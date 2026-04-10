@@ -1,0 +1,11 @@
+dist-newstyle/
+.ghc.environment.*
+vhdl/
+verilog/
+systemverilog/
+*.hi
+*.o
+.stack-work/
+result
+.direnv/
+.clash/
