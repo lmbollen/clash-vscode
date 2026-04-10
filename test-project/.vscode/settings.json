@@ -1,0 +1,9 @@
+{
+  "haskell.plugin.importLens.codeActionsOn": false,
+  "haskell.plugin.importLens.codeLensOn": false,
+  "haskell.plugin.semanticTokens.globalOn": false,
+  "haskell.plugin.inlayHints.globalOn": false,
+  "haskell.plugin.codeRange.globalOn": false,
+  "haskell.plugin.hlint.codeActionsOn": false,
+  "haskell.plugin.hlint.diagnosticsOn": false
+}

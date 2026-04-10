@@ -1,0 +1,69 @@
+{-# OPTIONS_GHC -Wno-orphans #-}
+
+module Example.Project where
+
+import Clash.Prelude
+import qualified Clash.Explicit.Signal.Delayed as D
+
+-- Create a domain with the frequency of your input clock. For this example we used
+-- 50 MHz.
+createDomain vSystem{vName="Dom50", vPeriod=hzToPeriod 50e6}
+
+-- | A simple accumulator that works on unsigned numbers of any size.
+-- It has hidden clock, reset, and enable signals.
+accum ::
+  (HiddenClockResetEnable dom, KnownNat n) =>
+  Signal dom (Unsigned n) ->
+  Signal dom (Unsigned n)
+accum = mealy accumT 0
+  where
+    accumT s i = (s + i, s)
+
+-- | @topEntity@ is Clash's equivalent of @main@ in other programming languages.
+-- Clash will look for it when compiling "Example.Project" and translate it to
+-- HDL. While polymorphism can be used freely in Clash projects, a @topEntity@
+-- must be monomorphic and must use non-recursive types. Or, to put it
+-- hand-wavily, a @topEntity@ must be translatable to a static number of wires.
+--
+-- Top entities must be monomorphic, meaning we have to specify all type variables.
+-- In this case, we are using the @Dom50@ domain, which we created with @createDomain@
+-- and we are using 8-bit unsigned numbers.
+topEntity ::
+  Clock Dom50 ->
+  Reset Dom50 ->
+  Enable Dom50 ->
+  Signal Dom50 (Unsigned 8) ->
+  Signal Dom50 (Unsigned 8)
+topEntity = exposeClockResetEnable accum
+
+-- To specify the names of the ports of our top entity, we create a
+-- @Synthesize@ annotation.
+{-# ANN topEntity
+  (Synthesize
+    { t_name = "accum"
+    , t_inputs = [ PortName "CLK"
+                 , PortName "RST"
+                 , PortName "EN"
+                 , PortName "DIN"
+                 ]
+    , t_output = PortName "DOUT"
+    }) #-}
+
+{-# OPAQUE topEntity #-}
+
+-- | A simple monomorphic function that adds two signed numbers
+-- This is an example of a function we want to synthesize
+plusSigned :: Signed 8 -> Signed 8 -> Signed 8
+plusSigned a b = a + b
+
+-- | A polymorphic function - this cannot be directly synthesized
+-- This demonstrates the difference we need to detect
+plusPoly :: (Num a) => a -> a -> a
+plusPoly a b = a + b
+
+-- | Another monomorphic function - multiplies two unsigned numbers
+multUnsigned :: Unsigned 16 -> Unsigned 16 -> Unsigned 32
+multUnsigned a b = resize a * resize b
+
+pipelinedSum :: Clock System -> Enable System -> Vec 8 (DSignal System 0 (Unsigned 16)) -> DSignal System 3 (Unsigned 16)
+pipelinedSum clk ena = D.delayedFold d1 0 (+) ena clk 

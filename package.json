@@ -1,0 +1,106 @@
+{
+  "name": "clash-vscode-yosys",
+  "displayName": "Clash Verilog Yosys Extension",
+  "description": "Synthesize Verilog from monomorphic Haskell functions using Clash and Yosys",
+  "version": "0.0.1",
+  "publisher": "clash-lang",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/yourusername/clash-vscode-yosys"
+  },
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "Other"
+  ],
+  "keywords": [
+    "clash",
+    "haskell",
+    "fpga",
+    "verilog",
+    "yosys",
+    "hardware"
+  ],
+  "activationEvents": [
+    "onLanguage:haskell"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "clash-vscode-yosys.detectFunctions",
+        "title": "Clash: Detect Functions"
+      },
+      {
+        "command": "clash-vscode-yosys.synthesizeFunction",
+        "title": "Clash: Synthesize Function to Verilog"
+      },
+      {
+        "command": "clash-vscode-yosys.synthesizeAndPnR",
+        "title": "Clash: Synthesize and Place & Route"
+      },
+      {
+        "command": "clash-vscode-yosys.checkToolchain",
+        "title": "Clash: Check Toolchain"
+      }
+    ],
+    "configuration": {
+      "title": "Clash Verilog Yosys",
+      "properties": {
+        "clash-vscode-yosys.yosysCommand": {
+          "type": "string",
+          "default": "yosys",
+          "description": "Command to run Yosys"
+        },
+        "clash-vscode-yosys.outputFormat": {
+          "type": "string",
+          "enum": [
+            "verilog",
+            "vhdl",
+            "systemverilog"
+          ],
+          "default": "verilog",
+          "description": "HDL output format for Clash"
+        },
+        "clash-vscode-yosys.autoCleanup": {
+          "type": "boolean",
+          "default": false,
+          "description": "Automatically cleanup temporary synthesis files"
+        },
+        "clash-vscode-yosys.showYosysSchematic": {
+          "type": "boolean",
+          "default": false,
+          "description": "Show schematic visualization after Yosys synthesis"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "pretest": "npm run compile && npm run lint",
+    "lint": "eslint src",
+    "test": "node ./out/test/runTest.js",
+    "test:unit": "echo 'Unit tests require running in VS Code test environment. Use F5 with Extension Tests configuration.'"
+  },
+  "devDependencies": {
+    "@types/mocha": "^10.0.10",
+    "@types/node": "20.x",
+    "@types/vscode": "^1.85.0",
+    "@typescript-eslint/eslint-plugin": "^8.0.0",
+    "@typescript-eslint/parser": "^8.0.0",
+    "@vscode/test-electron": "^2.4.0",
+    "eslint": "^9.0.0",
+    "glob": "^10.5.0",
+    "mocha": "^10.8.2",
+    "typescript": "^5.4.0"
+  },
+  "dependencies": {
+    "digitaljs": "^0.14.2",
+    "vscode-languageclient": "^9.0.1",
+    "yosys2digitaljs": "^0.10.3"
+  }
+}

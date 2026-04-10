@@ -1,0 +1,9 @@
+out
+node_modules
+.vscode-test/
+*.vsix
+.DS_Store
+.direnv/
+result
+.clash-vscode-debug.log
+.clash/

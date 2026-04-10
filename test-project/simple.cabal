@@ -1,0 +1,111 @@
+cabal-version:       2.4
+name:                simple
+version:             0.1
+license:             BSD-2-Clause
+author:              Test User <test@example.com>
+maintainer:          Test User <test@example.com>
+
+common common-options
+  default-extensions:
+    BangPatterns
+    BinaryLiterals
+    ConstraintKinds
+    DataKinds
+    DefaultSignatures
+    DeriveAnyClass
+    DeriveDataTypeable
+    DeriveFoldable
+    DeriveFunctor
+    DeriveGeneric
+    DeriveLift
+    DeriveTraversable
+    DerivingStrategies
+    FlexibleContexts
+    InstanceSigs
+    KindSignatures
+    LambdaCase
+    NamedFieldPuns
+    NoStarIsType
+    PolyKinds
+    RankNTypes
+    RecordWildCards
+    ScopedTypeVariables
+    StandaloneDeriving
+    TupleSections
+    TypeApplications
+    TypeFamilies
+    TypeOperators
+    ViewPatterns
+    TemplateHaskell
+    QuasiQuotes
+    NoImplicitPrelude
+
+  ghc-options:
+    -Wall -Wcompat
+    -haddock
+    -fplugin GHC.TypeLits.Extra.Solver
+    -fplugin GHC.TypeLits.Normalise
+    -fplugin GHC.TypeLits.KnownNat.Solver
+    -fexpose-all-unfoldings
+    -fno-worker-wrapper
+    -fno-unbox-small-strict-fields
+    -fno-unbox-strict-fields
+
+  build-depends:
+    base,
+    Cabal,
+    clash-prelude >= 1.8.4 && < 1.10,
+    ghc-typelits-natnormalise,
+    ghc-typelits-extra,
+    ghc-typelits-knownnat
+
+library
+  import: common-options
+  hs-source-dirs: src
+  exposed-modules:
+    Example.Project
+  default-language: Haskell2010
+
+executable clash
+  main-is: bin/Clash.hs
+  default-language: Haskell2010
+  Build-Depends: base, clash-ghc, simple
+  if !os(Windows)
+    ghc-options: -dynamic
+
+executable clashi
+  main-is: bin/Clashi.hs
+  default-language: Haskell2010
+  if !os(Windows)
+    ghc-options: -dynamic
+  build-depends: base, clash-ghc, simple
+
+test-suite doctests
+  type:             exitcode-stdio-1.0
+  default-language: Haskell2010
+  main-is:          doctests.hs
+  ghc-options:      -Wall -Wcompat -threaded
+  hs-source-dirs:   tests
+  build-depends:
+    base,
+    tasty,
+    simple,
+    doctest-parallel >= 0.2 && < 0.4,
+
+test-suite test-library
+  import: common-options
+  default-language: Haskell2010
+  hs-source-dirs: tests
+  type: exitcode-stdio-1.0
+  ghc-options: -threaded
+  main-is: unittests.hs
+  other-modules:
+    Tests.Example.Project
+  build-depends:
+    simple,
+    QuickCheck,
+    clash-prelude-hedgehog,
+    hedgehog,
+    tasty >= 1.2 && < 1.6,
+    tasty-hedgehog,
+    tasty-th
