@@ -3,17 +3,25 @@ import * as path from 'path';
 import { HLSClient } from './hls-client';
 import { FunctionDetector } from './function-detector';
 import { CodeGenerator, GenerationConfig } from './code-generator';
-import { ClashCompiler } from './clash-compiler';
+import { ClashCompiler, ClashCompilationResult } from './clash-compiler';
 import { YosysRunner } from './yosys-runner';
 import { NextpnrRunner } from './nextpnr-runner';
-import { DiagramViewer } from './diagram-viewer';
+import { ECP5Device, ECP5Package } from './nextpnr-types';
 import { FunctionInfo } from './types';
-import { ParsedClashManifest } from './clash-manifest-types';
+import { ClashManifestParser } from './clash-manifest-parser';
 import { ToolchainChecker } from './toolchain';
 import { initializeLogger, getLogger } from './file-logger';
+import { ClashCodeActionProvider } from './clash-code-actions';
+import { SynthesisResultsPanel } from './synthesis-results-panel';
+import { SynthesisResultsTreeProvider } from './synthesis-results-tree';
+import { HaskellFunctionsTreeProvider, FunctionNode } from './haskell-functions-tree';
 
 // Output channel for logging
 let outputChannel: vscode.OutputChannel;
+let synthesisTreeProvider: SynthesisResultsTreeProvider;
+let haskellFunctionsTreeProvider: HaskellFunctionsTreeProvider;
+let haskellFunctionsTreeView: vscode.TreeView<import('./haskell-functions-tree').FunctionTreeNode>;
+let extensionPath: string;
 let hlsClient: HLSClient;
 let functionDetector: FunctionDetector;
 let codeGenerator: CodeGenerator;
@@ -23,6 +31,8 @@ let nextpnrRunner: NextpnrRunner;
 let toolchain: ToolchainChecker;
 
 export function activate(context: vscode.ExtensionContext) {
+	extensionPath = context.extensionUri.fsPath;
+
 	// Create output channel for logging
 	outputChannel = vscode.window.createOutputChannel('Clash Synthesis');
 	context.subscriptions.push(outputChannel);
@@ -44,8 +54,119 @@ export function activate(context: vscode.ExtensionContext) {
 	nextpnrRunner = new NextpnrRunner(outputChannel);
 	toolchain = new ToolchainChecker(outputChannel);
 
+	// Register sidebar tree view for synthesis results
+	synthesisTreeProvider = new SynthesisResultsTreeProvider();
+	context.subscriptions.push(
+		vscode.window.registerTreeDataProvider(
+			'clash-vscode-yosys.synthesisResults',
+			synthesisTreeProvider
+		)
+	);
+
+	// Register sidebar tree view for Haskell functions.
+	// createTreeView (instead of registerTreeDataProvider) gives us a .selection
+	// property so title-bar buttons can read the currently selected function.
+	haskellFunctionsTreeProvider = new HaskellFunctionsTreeProvider();
+	haskellFunctionsTreeView = vscode.window.createTreeView(
+		'clash-vscode-yosys.haskellFunctions',
+		{ treeDataProvider: haskellFunctionsTreeProvider }
+	);
+	context.subscriptions.push(haskellFunctionsTreeView);
+
+	// Refresh functions view when active editor changes to a Haskell file
+	context.subscriptions.push(
+		vscode.window.onDidChangeActiveTextEditor(editor => {
+			if (editor && hlsClient.isHaskellDocument(editor.document)) {
+				refreshHaskellFunctionsTree(editor.document);
+			} else if (!editor || !hlsClient.isHaskellDocument(editor.document)) {
+				haskellFunctionsTreeProvider.clear();
+			}
+		})
+	);
+
+	// Refresh functions view when a Haskell file is saved
+	context.subscriptions.push(
+		vscode.workspace.onDidSaveTextDocument(doc => {
+			if (hlsClient.isHaskellDocument(doc) &&
+				vscode.window.activeTextEditor?.document === doc) {
+				refreshHaskellFunctionsTree(doc);
+			}
+		})
+	);
+
+	// Seed with the already-open file (if any)
+	if (vscode.window.activeTextEditor &&
+		hlsClient.isHaskellDocument(vscode.window.activeTextEditor.document)) {
+		refreshHaskellFunctionsTree(vscode.window.activeTextEditor.document);
+	}
+
+	// Command: (re-)open the synthesis results panel from the sidebar
+	context.subscriptions.push(
+		vscode.commands.registerCommand('clash-vscode-yosys.openResultsPanel', () => {
+			SynthesisResultsPanel.reopen();
+		})
+	);
+
+	// Command: refresh the Haskell functions tree manually
+	context.subscriptions.push(
+		vscode.commands.registerCommand('clash-vscode-yosys.refreshHaskellFunctions', () => {
+			const editor = vscode.window.activeTextEditor;
+			if (editor && hlsClient.isHaskellDocument(editor.document)) {
+				refreshHaskellFunctionsTree(editor.document);
+			}
+		})
+	);
+
+	// Command: open diagram viewer for a specific module (inline tree action)
+	context.subscriptions.push(
+		vscode.commands.registerCommand('clash-vscode-yosys.viewModuleDiagram', (item) => {
+			const moduleName: string | undefined = item?.result?.name;
+			SynthesisResultsPanel.reopen(moduleName);
+		})
+	);
+
+	// Command: navigate to a function (used by tree item clicks)
+	context.subscriptions.push(
+		vscode.commands.registerCommand('clash-vscode-yosys.goToFunction', async (info) => {
+			if (!info?.filePath || !info?.range) { return; }
+			const uri = vscode.Uri.file(info.filePath);
+			const doc = await vscode.workspace.openTextDocument(uri);
+			const editor = await vscode.window.showTextDocument(doc);
+			const start = new vscode.Position(
+				info.range.start.line,
+				info.range.start.character
+			);
+			editor.selection = new vscode.Selection(start, start);
+			editor.revealRange(
+				new vscode.Range(start, start),
+				vscode.TextEditorRevealType.InCenterIfOutsideViewport
+			);
+		})
+	);
+
+	// Command: run the extension's test suite in an integrated terminal
+	context.subscriptions.push(
+		vscode.commands.registerCommand('clash-vscode-yosys.runTests', () => {
+			const terminal = vscode.window.createTerminal({
+				name: 'Clash Extension Tests',
+				cwd: extensionPath
+			});
+			terminal.sendText('npm run compile && npm test');
+			terminal.show();
+		})
+	);
+
 	// Register commands
 	registerCommands(context);
+
+	// Register code action provider for Haskell files
+	context.subscriptions.push(
+		vscode.languages.registerCodeActionsProvider(
+			{ language: 'haskell', scheme: 'file' },
+			new ClashCodeActionProvider(functionDetector),
+			{ providedCodeActionKinds: ClashCodeActionProvider.providedCodeActionKinds }
+		)
+	);
 
 	outputChannel.appendLine('Clash Verilog Yosys Extension activated');
 	outputChannel.appendLine('Make sure Haskell Language Server is running for full functionality');
@@ -72,6 +193,23 @@ export function activate(context: vscode.ExtensionContext) {
 	}
 }
 
+/**
+ * Detect functions in the given document and update the Haskell functions
+ * sidebar tree.  Shows a loading spinner while HLS analysis is running.
+ * Silently ignores errors (HLS may not be ready yet).
+ */
+async function refreshHaskellFunctionsTree(doc: vscode.TextDocument): Promise<void> {
+	haskellFunctionsTreeProvider.setLoading(doc.fileName);
+	try {
+		const functions = await functionDetector.detectFunctions(doc);
+		haskellFunctionsTreeProvider.refresh(functions, doc.fileName);
+	} catch {
+		// HLS not ready — leave the loading state shown so the user knows
+		// something was attempted; they can hit Refresh once HLS is up.
+		haskellFunctionsTreeProvider.refresh([], doc.fileName);
+	}
+}
+
 function registerCommands(context: vscode.ExtensionContext) {
 	// Detect Functions command
 	context.subscriptions.push(
@@ -82,15 +220,22 @@ function registerCommands(context: vscode.ExtensionContext) {
 
 	// Synthesize Function command
 	context.subscriptions.push(
-		vscode.commands.registerCommand('clash-vscode-yosys.synthesizeFunction', async () => {
-			await synthesizeFunctionCommand();
+		vscode.commands.registerCommand('clash-vscode-yosys.synthesizeFunction', async (arg?: unknown) => {
+			await synthesizeFunctionCommand(unwrapFuncArg(arg));
 		})
 	);
 
 	// Synthesize and Place & Route command
 	context.subscriptions.push(
-		vscode.commands.registerCommand('clash-vscode-yosys.synthesizeAndPnR', async () => {
-			await synthesizeAndPnRCommand();
+		vscode.commands.registerCommand('clash-vscode-yosys.synthesizeAndPnR', async (arg?: unknown) => {
+			await synthesizeAndPnRCommand(unwrapFuncArg(arg));
+		})
+	);
+
+	// Synthesize Only command (no PnR)
+	context.subscriptions.push(
+		vscode.commands.registerCommand('clash-vscode-yosys.synthesizeOnly', async (arg?: unknown) => {
+			await synthesizeOnlyCommand(unwrapFuncArg(arg));
 		})
 	);
 
@@ -205,10 +350,7 @@ async function detectFunctionsCommand() {
 				}
 				
 				if (action === 'Synthesize') {
-					if (logger) {
-						await logger.operation('Calling synthesizeFunction', `From detectFunctionsCommand`);
-					}
-					await synthesizeFunction(selected);
+					await synthesizeOnlyCommand(selected);
 				}
 			} else {
 				if (logger) {
@@ -238,686 +380,423 @@ async function detectFunctionsCommand() {
 	}
 }
 
-/**
- * Command: Synthesize Function
- * Prompts user to select a function and synthesizes it
- */
-async function synthesizeFunctionCommand() {
-	outputChannel.show(true);
-	outputChannel.appendLine('='.repeat(60));
-	outputChannel.appendLine('Synthesize Function');
-	outputChannel.appendLine('='.repeat(60));
+// ── Shared pipeline helpers ──────────────────────────────────────────────────
 
-	try {
-		// First detect functions
-		let functions: FunctionInfo[];
-		
-		const activeEditor = vscode.window.activeTextEditor;
-		if (activeEditor && hlsClient.isHaskellDocument(activeEditor.document)) {
-			functions = await functionDetector.detectFunctions(activeEditor.document);
-		} else {
-			functions = await functionDetector.detectFunctionsInWorkspace();
-		}
+type ProgressReporter = vscode.Progress<{ message?: string; increment?: number }>;
 
-		if (functions.length === 0) {
-			vscode.window.showWarningMessage('No functions detected.');
-			return;
-		}
+interface CompilationOutput {
+	wrapperResult: { filePath: string; moduleName: string };
+	compileResult: ClashCompilationResult;
+	projectDirs: ReturnType<typeof CodeGenerator.getProjectDirectories>;
+	topModule: string;
+	verilogInput: string | string[];
+}
 
-		// Filter to only synthesizable functions
-		const synthesizable = functionDetector.filterSynthesizable(functions);
-		
-		if (synthesizable.length === 0) {
-			vscode.window.showWarningMessage(
-				'No monomorphic (synthesizable) functions found. All functions are polymorphic.'
-			);
-			outputChannel.appendLine('No synthesizable functions found');
-			return;
-		}
-
-		// Show picker with only synthesizable functions
-		const selected = await functionDetector.showFunctionPicker(synthesizable);
-		
-		if (selected) {
-			await synthesizeFunction(selected);
-		}
-
-	} catch (error) {
-		const message = error instanceof Error ? error.message : String(error);
-		vscode.window.showErrorMessage(`Error: ${message}`);
-		outputChannel.appendLine(`ERROR: ${message}`);
-	}
+interface SynthesisOutput {
+	synthResult: import('./yosys-types').YosysSynthesisResult;
+	moduleResults: import('./yosys-types').ModuleSynthesisResult[];
+	topModule: string;
+	sdcFrequencyMHz: number | undefined;
+	projectDirs: CompilationOutput['projectDirs'];
 }
 
 /**
- * Synthesize a function to Verilog using Clash
+ * When view/title toolbar buttons are clicked, VS Code passes the focused tree
+ * item as the first argument.  Unwrap FunctionNode → FunctionInfo; pass through
+ * a real FunctionInfo unchanged; return undefined for anything else.
  */
-async function synthesizeFunction(func: FunctionInfo) {
-	const logger = getLogger();
-	
-	if (logger) {
-		await logger.operation('synthesizeFunction', `Function: ${func.name}`);
-		await logger.debug(`Type: ${func.typeSignature}`);
-		await logger.debug(`Module: ${func.moduleName}`);
+function unwrapFuncArg(arg: unknown): FunctionInfo | undefined {
+	if (arg instanceof FunctionNode) { return arg.info; }
+	// A real FunctionInfo has a string `name` and a `range` object.
+	if (arg && typeof (arg as FunctionInfo).name === 'string' && (arg as FunctionInfo).range) {
+		return arg as FunctionInfo;
 	}
-	
-	outputChannel.appendLine('');
-	outputChannel.appendLine('='.repeat(60));
-	outputChannel.appendLine(`Synthesizing: ${func.name}`);
-	outputChannel.appendLine('='.repeat(60));
-	outputChannel.appendLine(`Module: ${func.moduleName}`);
-	outputChannel.appendLine(`Type: ${func.typeSignature}`);
-	outputChannel.appendLine('');
-	
-	// Validate function info
-	if (!func.name || !func.typeSignature || !func.moduleName) {
-		const error = 'Invalid function info: missing required fields';
-		vscode.window.showErrorMessage(error);
-		outputChannel.appendLine(`ERROR: ${error}`);
-		if (logger) {
-			await logger.error(error);
-		}
-		return;
-	}
-	
-	try {
-		if (logger) {
-			await logger.debug('Getting workspace root...');
-		}
-		
-		// Get workspace root
-		const workspaceFolders = vscode.workspace.workspaceFolders;
-		if (!workspaceFolders || workspaceFolders.length === 0) {
-			throw new Error('No workspace folder open');
-		}
-		
-		const workspaceRoot = workspaceFolders[0].uri.fsPath;
-		
-		if (logger) {
-			await logger.debug(`Workspace root: ${workspaceRoot}`);
-		}
-		
-		// Get configuration
-		const config = vscode.workspace.getConfiguration('clash-vscode-yosys');
-		const autoCleanup = config.get<boolean>('autoCleanup', false);
-		
-		if (logger) {
-			await logger.debug(`Auto cleanup: ${autoCleanup}`);
-			await logger.operation('generateWrapper', 'Starting code generation');
-		}
-		
-		// Generate wrapper module with new directory structure
-		const projectDirs = CodeGenerator.getProjectDirectories(workspaceRoot, func);
-		const genConfig: GenerationConfig = {
-			outputDir: projectDirs.haskell,
-			keepFiles: !autoCleanup,
-			modulePrefix: 'ClashSynth_'
-		};
-		
-		const result = await codeGenerator.generateWrapper(func, genConfig, workspaceRoot);
-		
-		// Ensure the synthesis cabal project is up to date so that
-		// 'cabal run clash' inside it can resolve all dependencies.
-		// Walk up from the source file to find its cabal project (if any).
-		const synthInfo = await codeGenerator.ensureSynthProject(workspaceRoot, func.filePath);
-		
-		if (logger) {
-			await logger.info(`Generated: ${result.filePath}`);
-		}
-		
-		outputChannel.appendLine('');
-		outputChannel.appendLine('✓ Code generation successful!');
-		outputChannel.appendLine(`Generated module: ${result.moduleName}`);
-		outputChannel.appendLine(`File: ${result.filePath}`);
-		outputChannel.appendLine('');
-		
-		// Ask user if they want to open the generated file
-		const action = await vscode.window.showInformationMessage(
-			`Generated wrapper module: ${result.moduleName}.hs`,
-			'Open File',
-			'Compile with Clash',
-			'Cancel'
-		);
-		
-		if (action === 'Open File') {
-			if (logger) {
-				await logger.operation('openFile', `File: ${result.filePath}`);
-			}
-			
-			try {
-				// Use URI to avoid path resolution issues
-				const uri = vscode.Uri.file(result.filePath);
-				
-				if (logger) {
-					await logger.debug(`Opening URI: ${uri.toString()}`);
-				}
-				
-				const document = await vscode.workspace.openTextDocument(uri);
-				
-				if (logger) {
-					await logger.debug('Document loaded, showing in editor...');
-				}
-				
-				await vscode.window.showTextDocument(document, {
-					preview: false,
-					preserveFocus: false
-				});
-				
-				if (logger) {
-					await logger.info('File opened successfully');
-				}
-			} catch (openError) {
-				const msg = openError instanceof Error ? openError.message : String(openError);
-				vscode.window.showErrorMessage(`Failed to open file: ${msg}`);
-				outputChannel.appendLine(`ERROR opening file: ${msg}`);
-				
-				if (logger) {
-					await logger.error('Failed to open file', openError);
-				}
-			}
-		} else if (action === 'Compile with Clash') {
-			if (logger) {
-				await logger.operation('compileWithClash', `Module: ${result.moduleName}`);
-			}
-			
-			outputChannel.appendLine('Starting Clash compilation...');
-			outputChannel.show(true);
-			
-			// Show progress notification
-			await vscode.window.withProgress({
-				location: vscode.ProgressLocation.Notification,
-				title: `Compiling ${result.moduleName} with Clash`,
-				cancellable: false
-			}, async (progress) => {
-				progress.report({ message: 'Running cabal run clash...' });
-				
-				try {
-					const compileResult = await clashCompiler.compileToVerilog(
-						result.filePath,
-						{
-							workspaceRoot,
-							outputDir: projectDirs.root,
-							moduleName: result.moduleName,
-							hdlDir: projectDirs.verilog,
-							synthProjectRoot: synthInfo.synthRoot,
-							cabalProjectDir: synthInfo.cabalProjectDir ?? undefined
-						}
-					);
-					
-					if (logger) {
-						await logger.info(`Compilation ${compileResult.success ? 'succeeded' : 'failed'}`);
-					}
-					
-					if (compileResult.success && compileResult.verilogPath) {
-						outputChannel.appendLine('');
-						outputChannel.appendLine('='.repeat(60));
-						outputChannel.appendLine('✓ Clash Compilation Successful!');
-						outputChannel.appendLine('='.repeat(60));
-						outputChannel.appendLine(`Verilog: ${compileResult.verilogPath}`);
-						
-						// Show warnings if any
-						if (compileResult.warnings.length > 0) {
-							outputChannel.appendLine('');
-							outputChannel.appendLine('Warnings:');
-							compileResult.warnings.forEach(w => outputChannel.appendLine(`  ${w}`));
-						}
-						
-						// Ask what to do next
-						const nextAction = await vscode.window.showInformationMessage(
-							'Clash compilation successful!',
-							'Open Verilog',
-							'Synthesize with Yosys',
-							'Done'
-						);
-						
-						if (nextAction === 'Open Verilog') {
-							const verilogUri = vscode.Uri.file(compileResult.verilogPath);
-							const verilogDoc = await vscode.workspace.openTextDocument(verilogUri);
-							await vscode.window.showTextDocument(verilogDoc);
-						} else if (nextAction === 'Synthesize with Yosys') {
-							// Run Yosys synthesis
-							await synthesizeWithYosys(
-								compileResult.verilogPath,
-								result.moduleName,
-								workspaceRoot,
-								projectDirs.yosys,
-								compileResult.manifest
-							);
-						}
-					} else {
-						outputChannel.appendLine('');
-						outputChannel.appendLine('='.repeat(60));
-						outputChannel.appendLine('✗ Clash Compilation Failed');
-						outputChannel.appendLine('='.repeat(60));
-						
-						if (compileResult.errors.length > 0) {
-							outputChannel.appendLine('Errors:');
-							compileResult.errors.forEach(e => outputChannel.appendLine(`  ${e}`));
-						}
-						
-						vscode.window.showErrorMessage(
-							'Clash compilation failed. Check output channel for details.',
-							'Show Output'
-						).then(choice => {
-							if (choice === 'Show Output') {
-								outputChannel.show(true);
-							}
-						});
-					}
-				} catch (error) {
-					const msg = error instanceof Error ? error.message : String(error);
-					if (logger) {
-						await logger.error('Clash compilation error', error);
-					}
-					vscode.window.showErrorMessage(`Compilation error: ${msg}`);
-					outputChannel.appendLine(`ERROR: ${msg}`);
-				}
-			});
-		}
-		
-	} catch (error) {
-		const message = error instanceof Error ? error.message : String(error);
-		vscode.window.showErrorMessage(`Synthesis failed: ${message}`);
-		outputChannel.appendLine(`ERROR: ${message}`);
-		if (error instanceof Error && error.stack) {
-			outputChannel.appendLine(error.stack);
-		}
-		
-		const logger = getLogger();
-		if (logger) {
-			await logger.error('Synthesis failed', error);
-		}
-	}
+	return undefined;
 }
 
 /**
- * Synthesize Verilog with Yosys
+ * Resolve which function to synthesize.
+ *
+ * Priority order:
+ *   1. `providedFunc` — explicit argument (e.g. from a code-action).
+ *   2. Selected item in the Haskell Functions tree view.
+ *   3. QuickPick over functions detected in the active editor.
  */
-async function synthesizeWithYosys(
-	verilogPath: string,
-	moduleName: string,
-	workspaceRoot: string,
-	yosysOutputDir: string,
-	manifest?: ParsedClashManifest
-) {
-	const logger = getLogger();
-	
-	// Check that yosys is available
-	const config = vscode.workspace.getConfiguration('clash-vscode-yosys');
-	const yosysCmd = config.get<string>('yosysCommand', 'yosys');
-	if (!(await toolchain.require('yosys', yosysCmd, '-V', workspaceRoot))) {
-		return;
+async function pickFunction(providedFunc?: FunctionInfo): Promise<FunctionInfo | undefined> {
+	if (providedFunc) { return providedFunc; }
+
+	// Check the Haskell Functions tree selection first — this is what the title-bar
+	// buttons should use when the user has highlighted a function in the sidebar.
+	const treeSelection = haskellFunctionsTreeView?.selection[0];
+	if (treeSelection instanceof FunctionNode) {
+		return treeSelection.info;
 	}
-	
-	if (logger) {
-		await logger.operation('synthesizeWithYosys', `Module: ${moduleName}`);
+
+	const activeEditor = vscode.window.activeTextEditor;
+	if (!activeEditor || !hlsClient.isHaskellDocument(activeEditor.document)) {
+		vscode.window.showErrorMessage('Please select a function in the Haskell Functions panel or open a Haskell file');
+		return undefined;
 	}
-	
-	outputChannel.show(true);
-	
-	// Show progress notification
-	await vscode.window.withProgress({
-		location: vscode.ProgressLocation.Notification,
-		title: `Synthesizing ${moduleName} with Yosys`,
-		cancellable: false
-	}, async (progress) => {
-		progress.report({ message: 'Running yosys synthesis...' });
-		
-		try {
-			// Yosys output directory is passed directly
-			
-			// Determine top module name
-			// Prefer manifest top_component.name, fall back to filename
-			let topModule: string;
-			if (manifest && manifest.top_component && manifest.top_component.name) {
-				topModule = manifest.top_component.name;
-				outputChannel.appendLine(`Using top module from manifest: ${topModule}`);
-			} else {
-				topModule = path.basename(verilogPath, '.v');
-				outputChannel.appendLine(`Using top module from filename: ${topModule}`);
-			}
-			
-			// Run Yosys synthesis
-			const synthResult = await yosysRunner.synthesize({
-				workspaceRoot,
-				outputDir: yosysOutputDir,
-				topModule,
-				verilogPath,
-				targetFamily: 'generic' // Generic synthesis for now
-			});
-			
-			if (logger) {
-				await logger.info(`Yosys synthesis ${synthResult.success ? 'succeeded' : 'failed'}`);
-			}
-			
-			if (synthResult.success) {
-				outputChannel.appendLine('');
-				outputChannel.appendLine('='.repeat(60));
-				outputChannel.appendLine('✓ Yosys Synthesis Successful!');
-				outputChannel.appendLine('='.repeat(60));
-				
-				// Display statistics
-				if (synthResult.statistics) {
-					const stats = synthResult.statistics;
-					outputChannel.appendLine('');
-					outputChannel.appendLine('Synthesis Statistics:');
-					outputChannel.appendLine('-'.repeat(40));
-					
-					if (stats.cellCount !== undefined) {
-						outputChannel.appendLine(`  Cells: ${stats.cellCount}`);
-					}
-					if (stats.wireCount !== undefined) {
-						outputChannel.appendLine(`  Wires: ${stats.wireCount}`);
-					}
-					if (stats.chipArea !== undefined) {
-						outputChannel.appendLine(`  Area: ${stats.chipArea}`);
-					}
-					
-					if (stats.cellTypes && stats.cellTypes.size > 0) {
-						outputChannel.appendLine('');
-						outputChannel.appendLine('  Cell Types:');
-						stats.cellTypes.forEach((count, type) => {
-							outputChannel.appendLine(`    ${type}: ${count}`);
-						});
-					}
-				}
-				
-				if (synthResult.synthesizedVerilogPath) {
-					outputChannel.appendLine('');
-					outputChannel.appendLine(`Synthesized Verilog: ${synthResult.synthesizedVerilogPath}`);
-				}
-				
-				if (synthResult.jsonPath) {
-					outputChannel.appendLine(`JSON output: ${synthResult.jsonPath}`);
-				}
-				
-				// Show warnings if any
-				if (synthResult.warnings.length > 0) {
-					outputChannel.appendLine('');
-					outputChannel.appendLine(`Warnings (${synthResult.warnings.length}):`);
-					synthResult.warnings.forEach(w => 
-						outputChannel.appendLine(`  ${w.message}`)
-					);
-				}
-				
-				// Ask what to do next
-				const actions = ['View Interactive Circuit', 'Open Synthesized Verilog', 'View Statistics', 'Done'];
-				
-				const nextAction = await vscode.window.showInformationMessage(
-					`Synthesis complete! Cells: ${synthResult.statistics?.cellCount || 'N/A'}, Wires: ${synthResult.statistics?.wireCount || 'N/A'}`,
-					...actions
-				);
-				
-				if (nextAction === 'View Interactive Circuit') {
-					// Pass the directory containing Verilog files
-					const verilogDir = path.dirname(verilogPath);
-					await DiagramViewer.showDiagram(
-						verilogDir,
-						topModule,
-						outputChannel
-					);
-				} else if (nextAction === 'Open Synthesized Verilog' && synthResult.synthesizedVerilogPath) {
-					const uri = vscode.Uri.file(synthResult.synthesizedVerilogPath);
-					const doc = await vscode.workspace.openTextDocument(uri);
-					await vscode.window.showTextDocument(doc);
-				} else if (nextAction === 'View Statistics' && synthResult.statistics) {
-					// Show statistics in a more detailed way
-					const statsText = synthResult.statistics.rawStats || 'No detailed statistics available';
-					const doc = await vscode.workspace.openTextDocument({
-						content: statsText,
-						language: 'plaintext'
-					});
-					await vscode.window.showTextDocument(doc, { preview: true });
-				}
-			} else {
-				outputChannel.appendLine('');
-				outputChannel.appendLine('='.repeat(60));
-				outputChannel.appendLine('✗ Yosys Synthesis Failed');
-				outputChannel.appendLine('='.repeat(60));
-				
-				if (synthResult.errors.length > 0) {
-					outputChannel.appendLine('Errors:');
-					synthResult.errors.forEach(e => outputChannel.appendLine(`  ${e.message}`));
-				}
-				
-				vscode.window.showErrorMessage(
-					'Yosys synthesis failed. Check output channel for details.',
-					'Show Output'
-				).then(choice => {
-					if (choice === 'Show Output') {
-						outputChannel.show(true);
-					}
-				});
-			}
-		} catch (error) {
-			const msg = error instanceof Error ? error.message : String(error);
-			if (logger) {
-				await logger.error('Yosys synthesis error', error);
-			}
-			vscode.window.showErrorMessage(`Synthesis error: ${msg}`);
-			outputChannel.appendLine(`ERROR: ${msg}`);
-		}
+
+	const functions = await functionDetector.detectFunctions(activeEditor.document);
+	if (functions.length === 0) {
+		vscode.window.showWarningMessage('No functions found to synthesize');
+		return undefined;
+	}
+
+	const items = functions.map(f => ({
+		label: f.name,
+		description: f.typeSignature || 'no type signature',
+		detail: `${f.filePath}:${f.range.start.line}`,
+		function: f
+	}));
+
+	const sel = await vscode.window.showQuickPick(items, { placeHolder: 'Select function to synthesize' });
+	return sel?.function;
+}
+
+/**
+ * Step 1 of the pipeline: generate the Clash wrapper and compile to Verilog.
+ */
+async function runClashCompilation(
+	func: FunctionInfo,
+	wsRoot: string,
+	progress: ProgressReporter
+): Promise<CompilationOutput> {
+	const projectDirs = CodeGenerator.getProjectDirectories(wsRoot, func);
+	const genConfig: GenerationConfig = { keepFiles: true, modulePrefix: 'ClashSynth_' };
+
+	progress.report({ message: 'Generating Clash wrapper…', increment: 10 });
+	outputChannel.appendLine('\n=== Step 1: Generating Clash Wrapper ===');
+	const wrapperResult = await codeGenerator.generateWrapper(func, genConfig, wsRoot);
+	outputChannel.appendLine(`✓ Generated: ${wrapperResult.filePath}`);
+
+	const synthInfo = await codeGenerator.ensureSynthProject(wsRoot, func.filePath);
+
+	progress.report({ message: 'Compiling to Verilog with Clash…', increment: 20 });
+	outputChannel.appendLine('\n=== Step 2: Compiling with Clash ===');
+
+	const compileResult = await clashCompiler.compileToVerilog(wrapperResult.filePath, {
+		workspaceRoot: wsRoot,
+		outputDir: projectDirs.root,
+		moduleName: wrapperResult.moduleName,
+		hdlDir: projectDirs.verilog,
+		synthProjectRoot: synthInfo.synthRoot,
+		cabalProjectDir: synthInfo.cabalProjectDir ?? undefined
 	});
+
+	if (!compileResult.success) {
+		if (compileResult.errors.length > 0) {
+			outputChannel.appendLine('Errors:');
+			compileResult.errors.forEach(e => outputChannel.appendLine(`  ${e}`));
+		}
+		throw new Error('Clash compilation failed — check the output channel for details');
+	}
+	outputChannel.appendLine(`✓ Verilog: ${compileResult.verilogPath}`);
+
+	const topModule = compileResult.manifest?.top_component?.name
+		?? path.basename(compileResult.verilogPath!, '.v');
+	const verilogInput = compileResult.allVerilogFiles ?? compileResult.verilogPath!;
+
+	return { wrapperResult, compileResult, projectDirs, topModule, verilogInput };
+}
+
+/**
+ * Step 2 of the pipeline: synthesize with Yosys.
+ *
+ * Always returns a non-empty `moduleResults` array — even for whole-design
+ * synthesis where Yosys only produces a single top-level JSON — so the
+ * diagram panel always has data to display.
+ */
+async function runYosynsSynthesis(
+	compiled: CompilationOutput,
+	wsRoot: string,
+	synthesisMode: string,
+	targetFamily: 'ecp5' | 'generic',
+	progress: ProgressReporter
+): Promise<SynthesisOutput> {
+	const { compileResult, projectDirs, topModule, verilogInput } = compiled;
+
+	progress.report({ message: 'Synthesizing with Yosys…', increment: 40 });
+	outputChannel.appendLine('\n=== Step 3: Synthesizing with Yosys ===');
+	outputChannel.appendLine(`Mode: ${synthesisMode}`);
+
+	let synthResult: import('./yosys-types').YosysSynthesisResult;
+
+	if (compileResult.manifest) {
+		const manifestParser = new ClashManifestParser();
+		const components = await manifestParser.buildDependencyGraph(compileResult.manifest.manifestPath);
+
+		if (synthesisMode === 'per-module' && components.length > 1) {
+			synthResult = await yosysRunner.synthesizePerModule(components, {
+				workspaceRoot: wsRoot, outputDir: projectDirs.yosys,
+				topModule, verilogPath: verilogInput, targetFamily
+			});
+		} else {
+			synthResult = await yosysRunner.synthesizeParallel(components, {
+				workspaceRoot: wsRoot, outputDir: projectDirs.yosys,
+				topModule, verilogPath: verilogInput, targetFamily
+			});
+		}
+	} else {
+		synthResult = await yosysRunner.synthesize({
+			workspaceRoot: wsRoot, outputDir: projectDirs.yosys,
+			topModule, verilogPath: verilogInput, targetFamily
+		});
+	}
+
+	if (!synthResult.success) {
+		if (synthResult.errors.length > 0) {
+			outputChannel.appendLine('Errors:');
+			synthResult.errors.forEach(e => outputChannel.appendLine(`  ${e.message}`));
+		}
+		throw new Error('Yosys synthesis failed — check the output channel for details');
+	}
+	outputChannel.appendLine('✓ Synthesis complete');
+
+	if (synthResult.statistics) {
+		outputChannel.appendLine(`  Cells: ${synthResult.statistics.cellCount ?? 'N/A'}`);
+		outputChannel.appendLine(`  Wires: ${synthResult.statistics.wireCount ?? 'N/A'}`);
+	}
+
+	// Parse SDC target frequency if available.
+	let sdcFrequencyMHz: number | undefined;
+	if (compileResult.manifest) {
+		sdcFrequencyMHz = await new ClashManifestParser()
+			.parseSdcFrequency(compileResult.manifest.directory);
+		if (sdcFrequencyMHz) {
+			outputChannel.appendLine(`  SDC target: ${sdcFrequencyMHz.toFixed(2)} MHz`);
+		}
+	}
+
+	// Normalise into ModuleSynthesisResult[] so the panel always has data.
+	const moduleResults: import('./yosys-types').ModuleSynthesisResult[] =
+		synthResult.moduleResults ?? [{
+			name: topModule,
+			success: synthResult.success,
+			diagramJsonPath: synthResult.jsonPath,
+			elapsedMs: 0,
+			statistics: synthResult.statistics,
+			errors: synthResult.errors
+		}];
+
+	return { synthResult, moduleResults, topModule, sdcFrequencyMHz, projectDirs };
+}
+
+// ── Commands ─────────────────────────────────────────────────────────────────
+
+/**
+ * Command: Generate Verilog
+ * Generates the Clash wrapper and compiles to Verilog, then shows the result.
+ */
+async function synthesizeFunctionCommand(providedFunc?: FunctionInfo) {
+	const wsRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+	if (!wsRoot) { vscode.window.showErrorMessage('No workspace folder open'); return; }
+
+	const func = await pickFunction(providedFunc);
+	if (!func) { return; }
+
+	outputChannel.show(true);
+	outputChannel.appendLine('='.repeat(60));
+	outputChannel.appendLine(`Generate Verilog: ${func.name}`);
+	outputChannel.appendLine('='.repeat(60));
+
+	try {
+		await vscode.window.withProgress({
+			location: vscode.ProgressLocation.Notification,
+			title: `Compiling ${func.name} to Verilog`,
+			cancellable: false
+		}, async (progress) => {
+			const { compileResult } = await runClashCompilation(func, wsRoot, progress);
+			progress.report({ message: 'Done', increment: 100 });
+
+			outputChannel.appendLine('');
+			outputChannel.appendLine('='.repeat(60));
+			outputChannel.appendLine('✓ Verilog generated!');
+			outputChannel.appendLine('='.repeat(60));
+			if (compileResult.warnings.length > 0) {
+				outputChannel.appendLine('Warnings:');
+				compileResult.warnings.forEach(w => outputChannel.appendLine(`  ${w}`));
+			}
+
+			const action = await vscode.window.showInformationMessage(
+				`Verilog generated: ${path.basename(compileResult.verilogPath ?? '')}`,
+				'Open Verilog', 'Done'
+			);
+			if (action === 'Open Verilog' && compileResult.verilogPath) {
+				const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(compileResult.verilogPath));
+				await vscode.window.showTextDocument(doc);
+			}
+		});
+	} catch (error) {
+		const msg = error instanceof Error ? error.message : String(error);
+		vscode.window.showErrorMessage(`Verilog generation failed: ${msg}`);
+		outputChannel.appendLine(`ERROR: ${msg}`);
+	}
+}
+
+/**
+ * Command: Synthesize (no Place & Route)
+ * Calls runClashCompilation → runYosynsSynthesis, then always opens the
+ * diagram panel so the user gets circuit visualisations.
+ */
+async function synthesizeOnlyCommand(providedFunc?: FunctionInfo) {
+	const wsRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+	if (!wsRoot) { vscode.window.showErrorMessage('No workspace folder open'); return; }
+
+	const cfg = vscode.workspace.getConfiguration('clash-vscode-yosys');
+	if (!(await toolchain.require('yosys', cfg.get<string>('yosysCommand', 'yosys'), '-V', wsRoot))) { return; }
+
+	const func = await pickFunction(providedFunc);
+	if (!func) { return; }
+
+	outputChannel.show(true);
+	outputChannel.appendLine('='.repeat(60));
+	outputChannel.appendLine(`Synthesize: ${func.name}`);
+	outputChannel.appendLine('='.repeat(60));
+
+	try {
+		await vscode.window.withProgress({
+			location: vscode.ProgressLocation.Notification,
+			title: `Synthesizing ${func.name}`,
+			cancellable: false
+		}, async (progress) => {
+			const compiled = await runClashCompilation(func, wsRoot, progress);
+			const { synthResult, moduleResults, topModule, sdcFrequencyMHz } =
+				await runYosynsSynthesis(
+					compiled, wsRoot,
+					cfg.get<string>('synthesisMode', 'per-module'),
+					'ecp5', progress
+				);
+
+			progress.report({ message: 'Done', increment: 100 });
+			outputChannel.appendLine('');
+			outputChannel.appendLine('='.repeat(60));
+			outputChannel.appendLine('✓ Synthesis Complete!');
+			outputChannel.appendLine('='.repeat(60));
+			if (sdcFrequencyMHz) {
+				outputChannel.appendLine(`  Target: ${sdcFrequencyMHz.toFixed(2)} MHz`);
+			}
+			if (moduleResults.length > 1) {
+				outputChannel.appendLine('');
+				outputChannel.appendLine('Per-Module Results:');
+				for (const mr of moduleResults) {
+					const cells = mr.statistics?.cellCount !== undefined ? `${mr.statistics.cellCount} cells` : 'no cell count';
+					const wires = mr.statistics?.wireCount !== undefined ? `, ${mr.statistics.wireCount} wires` : '';
+					outputChannel.appendLine(`  ${mr.success ? '✓' : '✗'} ${mr.name}: ${cells}${wires}  [${mr.elapsedMs}ms]`);
+				}
+			}
+
+			// Always open the diagram panel — single-module or multi-module.
+			SynthesisResultsPanel.show(moduleResults, `Synthesis Results — ${topModule}`, outputChannel);
+			synthesisTreeProvider.refresh(moduleResults);
+
+			const action = await vscode.window.showInformationMessage(
+				`Synthesis complete! Cells: ${synthResult.statistics?.cellCount ?? 'N/A'}`,
+				'Open Synthesized Verilog', 'Done'
+			);
+			if (action === 'Open Synthesized Verilog' && synthResult.synthesizedVerilogPath) {
+				const doc = await vscode.workspace.openTextDocument(
+					vscode.Uri.file(synthResult.synthesizedVerilogPath)
+				);
+				await vscode.window.showTextDocument(doc);
+			}
+		});
+	} catch (error) {
+		const msg = error instanceof Error ? error.message : String(error);
+		vscode.window.showErrorMessage(`Synthesis error: ${msg}`);
+		outputChannel.appendLine(`ERROR: ${msg}`);
+	}
 }
 
 /**
  * Command: Synthesize and Place & Route
- * Full FPGA workflow: detect function, generate wrapper, compile to Verilog, 
- * synthesize with Yosys, and place & route with nextpnr
+ * Calls synthesizeOnlyCommand's pipeline, then runs nextpnr for timing.
+ * PnR always uses whole-design synthesis so nextpnr gets a merged netlist.
  */
-async function synthesizeAndPnRCommand() {
-	const logger = getLogger();
-	
+async function synthesizeAndPnRCommand(providedFunc?: FunctionInfo) {
+	const wsRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+	if (!wsRoot) { vscode.window.showErrorMessage('No workspace folder open'); return; }
+
+	const cfg = vscode.workspace.getConfiguration('clash-vscode-yosys');
+	if (!(await toolchain.require('yosys', cfg.get<string>('yosysCommand', 'yosys'), '-V', wsRoot))) { return; }
+	if (!(await toolchain.require('nextpnr-ecp5', 'nextpnr-ecp5', '--version', wsRoot))) { return; }
+
+	const func = await pickFunction(providedFunc);
+	if (!func) { return; }
+
+	const deviceOptions = [
+		{ label: 'LFE5U-25F (25k LUTs)', value: '25k', description: 'Small ECP5' },
+		{ label: 'LFE5U-45F (45k LUTs)', value: '45k', description: 'Medium ECP5' },
+		{ label: 'LFE5U-85F (85k LUTs)', value: '85k', description: 'Large ECP5' }
+	];
+	const deviceChoice = await vscode.window.showQuickPick(deviceOptions, { placeHolder: 'Select target ECP5 device' });
+	if (!deviceChoice) { return; }
+
+	const packageOptions = [
+		{ label: 'CABGA381', value: 'CABGA381' },
+		{ label: 'CABGA554', value: 'CABGA554' },
+		{ label: 'CABGA756', value: 'CABGA756' }
+	];
+	const packageChoice = await vscode.window.showQuickPick(packageOptions, { placeHolder: 'Select package type' });
+	if (!packageChoice) { return; }
+
+	outputChannel.show(true);
+	outputChannel.appendLine('='.repeat(60));
+	outputChannel.appendLine(`Synthesize + Place & Route: ${func.name}`);
+	outputChannel.appendLine('='.repeat(60));
+
 	try {
-		if (logger) {
-			await logger.operation('synthesizeAndPnRCommand', 'Starting');
-		}
-		
-		// Check required tools up front (cabal is checked implicitly via the synth project)
-		const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-		const cfg = vscode.workspace.getConfiguration('clash-vscode-yosys');
-		const yosysCmd = cfg.get<string>('yosysCommand', 'yosys');
-		
-		if (!(await toolchain.require('yosys', yosysCmd, '-V', workspaceRoot))) { return; }
-		if (!(await toolchain.require('nextpnr-ecp5', 'nextpnr-ecp5', '--version', workspaceRoot))) { return; }
-		
-		outputChannel.show(true);
-		outputChannel.appendLine('='.repeat(60));
-		outputChannel.appendLine('Full FPGA Synthesis & Place-and-Route');
-		outputChannel.appendLine('='.repeat(60));
-
-		// Get workspace folder
-		const workspaceFolders = vscode.workspace.workspaceFolders;
-		if (!workspaceFolders || workspaceFolders.length === 0 || !workspaceRoot) {
-			vscode.window.showErrorMessage('No workspace folder open');
-			return;
-		}
-
-		// After the guard, workspaceRoot is definitely a string
-		const wsRoot = workspaceRoot;
-
-		// Step 1: Detect functions
-		outputChannel.appendLine('\n=== Step 1: Detecting Functions ===');
-		const activeEditor = vscode.window.activeTextEditor;
-		if (!activeEditor || !hlsClient.isHaskellDocument(activeEditor.document)) {
-			vscode.window.showErrorMessage('Please open a Haskell file first');
-			return;
-		}
-
-		const functions = await functionDetector.detectFunctions(activeEditor.document);
-		if (functions.length === 0) {
-			vscode.window.showWarningMessage('No monomorphic functions found to synthesize');
-			return;
-		}
-
-		// Step 2: Let user pick a function
-		const functionItems = functions.map(f => ({
-			label: f.name,
-			description: f.typeSignature || 'no type signature',
-			detail: `at ${f.filePath}:${f.range.start.line}`,
-			function: f
-		}));
-
-		const selected = await vscode.window.showQuickPick(functionItems, {
-			placeHolder: 'Select function to synthesize and implement on FPGA'
-		});
-
-		if (!selected) {
-			return;
-		}
-
-		const func = selected.function;
-		outputChannel.appendLine(`Selected: ${func.name} :: ${func.typeSignature}`);
-
-		// Step 3: Get ECP5 chip configuration
-		const deviceOptions = [
-			{ label: 'LFE5U-25F (25k LUTs)', value: '25k', description: 'Small ECP5' },
-			{ label: 'LFE5U-45F (45k LUTs)', value: '45k', description: 'Medium ECP5' },
-			{ label: 'LFE5U-85F (85k LUTs)', value: '85k', description: 'Large ECP5' }
-		];
-
-		const deviceChoice = await vscode.window.showQuickPick(deviceOptions, {
-			placeHolder: 'Select target ECP5 device'
-		});
-
-		if (!deviceChoice) {
-			return;
-		}
-
-		const packageOptions = [
-			{ label: 'CABGA381', value: 'CABGA381' },
-			{ label: 'CABGA554', value: 'CABGA554' },
-			{ label: 'CABGA756', value: 'CABGA756' }
-		];
-
-		const packageChoice = await vscode.window.showQuickPick(packageOptions, {
-			placeHolder: 'Select package type'
-		});
-
-		if (!packageChoice) {
-			return;
-		}
-
-		// Full workflow
 		await vscode.window.withProgress({
 			location: vscode.ProgressLocation.Notification,
 			title: `Implementing ${func.name} on ECP5`,
 			cancellable: false
 		}, async (progress) => {
-			// Get project directory structure
-			const projectDirs = CodeGenerator.getProjectDirectories(workspaceRoot, func);
-			
-			// Step 4: Generate wrapper
-			progress.report({ message: 'Generating Clash wrapper...', increment: 10 });
-			outputChannel.appendLine('\n=== Step 2: Generating Clash Wrapper ===');
-			
-			const genConfig: GenerationConfig = {
-				outputDir: projectDirs.haskell,
-				keepFiles: true,
-				modulePrefix: 'ClashSynth_'
-			};
-			const wrapperResult = await codeGenerator.generateWrapper(func, genConfig, wsRoot);
+			// Steps 1–3: same Clash + Yosys pipeline as synthesizeOnlyCommand.
+			// PnR always uses whole-design synthesis (nextpnr needs a merged netlist).
+			const compiled = await runClashCompilation(func, wsRoot, progress);
+			const { synthResult, moduleResults, topModule, sdcFrequencyMHz, projectDirs } =
+				await runYosynsSynthesis(compiled, wsRoot, 'whole-design', 'ecp5', progress);
 
-			outputChannel.appendLine(`✓ Generated: ${wrapperResult.filePath}`);
+			// Show diagrams panel — same as synthesize-only step.
+			SynthesisResultsPanel.show(moduleResults, `Synthesis Results — ${topModule}`, outputChannel);
+			synthesisTreeProvider.refresh(moduleResults);
 
-			// Ensure synthesis cabal project is up to date
-			const pnrSynthInfo = await codeGenerator.ensureSynthProject(wsRoot, func.filePath);
-
-			// Step 5: Compile with Clash
-			progress.report({ message: 'Compiling to Verilog with Clash...', increment: 20 });
-			outputChannel.appendLine('\n=== Step 3: Compiling with Clash ===');
-
-			const compileResult = await clashCompiler.compileToVerilog(
-				wrapperResult.filePath,
-				{
-					workspaceRoot: wsRoot,
-					outputDir: projectDirs.root,
-					moduleName: wrapperResult.moduleName,
-					hdlDir: projectDirs.verilog,
-					synthProjectRoot: pnrSynthInfo.synthRoot,
-					cabalProjectDir: pnrSynthInfo.cabalProjectDir ?? undefined
-				}
-			);
-
-			if (!compileResult.success) {
-				throw new Error(`Clash compilation failed`);
-			}
-
-			outputChannel.appendLine(`✓ Verilog generated: ${compileResult.verilogPath}`);
-
-			// Step 6: Synthesize with Yosys
-			progress.report({ message: 'Synthesizing with Yosys...', increment: 30 });
-			outputChannel.appendLine('\n=== Step 4: Synthesizing with Yosys ===');
-
-			// Determine top module name
-			// Prefer manifest top_component.name, fall back to filename
-			let topModule: string;
-			if (compileResult.manifest && compileResult.manifest.top_component && compileResult.manifest.top_component.name) {
-				topModule = compileResult.manifest.top_component.name;
-				outputChannel.appendLine(`Using top module from manifest: ${topModule}`);
-			} else {
-				topModule = path.basename(compileResult.verilogPath!, '.v');
-				outputChannel.appendLine(`Using top module from filename: ${topModule}`);
-			}
-
-			// Use all Verilog files from manifest if available (includes dependencies)
-			// Otherwise fall back to single file
-			const verilogInput = compileResult.allVerilogFiles || compileResult.verilogPath!;
-
-			const synthResult = await yosysRunner.synthesize({
-				workspaceRoot: wsRoot,
-				outputDir: projectDirs.yosys,
-				topModule,
-				verilogPath: verilogInput,
-				targetFamily: 'ecp5'
-			});
-
-			if (!synthResult.success) {
-				throw new Error('Yosys synthesis failed');
-			}
-
-			outputChannel.appendLine('✓ Synthesis successful');
-
-			// Step 7: Place & Route with nextpnr
-			progress.report({ message: 'Place and Route with nextpnr...', increment: 60 });
-			outputChannel.appendLine('\n=== Step 5: Place & Route with nextpnr ===');
-
+			// Step 4: Place & Route
 			if (!synthResult.jsonPath) {
-				throw new Error('No JSON output from Yosys');
+				throw new Error('No JSON output from Yosys — cannot run PnR');
 			}
+
+			progress.report({ message: 'Place and Route with nextpnr…', increment: 60 });
+			outputChannel.appendLine('\n=== Step 4: Place & Route with nextpnr ===');
 
 			const pnrResult = await nextpnrRunner.placeAndRoute({
 				family: 'ecp5',
 				jsonPath: synthResult.jsonPath,
 				outputDir: projectDirs.nextpnr,
 				topModule,
+				frequency: sdcFrequencyMHz,
 				ecp5: {
-					device: deviceChoice.value as any,
-					package: packageChoice.value as any,
+					device: deviceChoice.value as ECP5Device,
+					package: packageChoice.value as ECP5Package,
 					speedGrade: '6'
 				}
 			});
 
 			if (!pnrResult.success) {
-				throw new Error('Place and route failed');
+				throw new Error('Place and route failed — check output channel for details');
 			}
 
-			// Display results
-			progress.report({ message: 'Complete!', increment: 100 });
+			progress.report({ message: 'Done', increment: 100 });
 			outputChannel.appendLine('');
 			outputChannel.appendLine('='.repeat(60));
 			outputChannel.appendLine('✓ FPGA Implementation Complete!');
 			outputChannel.appendLine('='.repeat(60));
-			outputChannel.appendLine('');
-			outputChannel.appendLine('Output Files:');
-			outputChannel.appendLine(`  Verilog:   ${compileResult.verilogPath}`);
-			outputChannel.appendLine(`  Synthesis: ${synthResult.synthesizedVerilogPath}`);
 			outputChannel.appendLine(`  Config:    ${pnrResult.textcfgPath}`);
 			if (pnrResult.bitstreamPath) {
 				outputChannel.appendLine(`  Bitstream: ${pnrResult.bitstreamPath}`);
 			}
 
-			// Display timing
 			if (pnrResult.timing) {
 				const t = pnrResult.timing;
 				outputChannel.appendLine('');
@@ -935,55 +814,35 @@ async function synthesizeAndPnRCommand() {
 				outputChannel.appendLine(`  Constraints: ${t.constraintsMet ? '✓ MET' : '✗ FAILED'}`);
 			}
 
-			// Display utilization
 			if (pnrResult.utilization) {
 				const u = pnrResult.utilization;
 				outputChannel.appendLine('');
 				outputChannel.appendLine('Resource Utilization:');
 				outputChannel.appendLine('-'.repeat(40));
 				if (u.luts) {
-					const pct = ((u.luts.used / u.luts.total) * 100).toFixed(1);
-					outputChannel.appendLine(`  LUTs:      ${u.luts.used}/${u.luts.total} (${pct}%)`);
+					outputChannel.appendLine(`  LUTs:      ${u.luts.used}/${u.luts.total} (${((u.luts.used / u.luts.total) * 100).toFixed(1)}%)`);
 				}
 				if (u.registers) {
-					const pct = ((u.registers.used / u.registers.total) * 100).toFixed(1);
-					outputChannel.appendLine(`  Registers: ${u.registers.used}/${u.registers.total} (${pct}%)`);
+					outputChannel.appendLine(`  Registers: ${u.registers.used}/${u.registers.total} (${((u.registers.used / u.registers.total) * 100).toFixed(1)}%)`);
 				}
 				if (u.bram) {
-					const pct = ((u.bram.used / u.bram.total) * 100).toFixed(1);
-					outputChannel.appendLine(`  BRAM:      ${u.bram.used}/${u.bram.total} (${pct}%)`);
+					outputChannel.appendLine(`  BRAM:      ${u.bram.used}/${u.bram.total} (${((u.bram.used / u.bram.total) * 100).toFixed(1)}%)`);
 				}
 				if (u.io) {
-					const pct = ((u.io.used / u.io.total) * 100).toFixed(1);
-					outputChannel.appendLine(`  IO:        ${u.io.used}/${u.io.total} (${pct}%)`);
+					outputChannel.appendLine(`  IO:        ${u.io.used}/${u.io.total} (${((u.io.used / u.io.total) * 100).toFixed(1)}%)`);
 				}
 			}
 
 			const action = await vscode.window.showInformationMessage(
 				`✓ FPGA implementation complete! Bitstream: ${path.basename(pnrResult.bitstreamPath || '')}`,
-				'View Interactive Circuit',
-				'Open Bitstream Folder'
+				'Open Bitstream Folder', 'Done'
 			);
-			
-			if (action === 'View Interactive Circuit') {
-				// Use manifest files if available, otherwise fall back to directory scan
-				const verilogSource = compileResult.allVerilogFiles || path.dirname(compileResult.verilogPath!);
-				await DiagramViewer.showDiagram(
-					verilogSource,
-					topModule,
-					outputChannel
-				);
-			} else if (action === 'Open Bitstream Folder') {
-				const uri = vscode.Uri.file(projectDirs.nextpnr);
-				await vscode.commands.executeCommand('revealFileInOS', uri);
+			if (action === 'Open Bitstream Folder') {
+				await vscode.commands.executeCommand('revealFileInOS', vscode.Uri.file(projectDirs.nextpnr));
 			}
 		});
-
 	} catch (error) {
 		const msg = error instanceof Error ? error.message : String(error);
-		if (logger) {
-			await logger.error('Synthesis and PnR error', error);
-		}
 		vscode.window.showErrorMessage(`Implementation error: ${msg}`);
 		outputChannel.appendLine(`ERROR: ${msg}`);
 	}

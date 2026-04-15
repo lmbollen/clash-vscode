@@ -7,9 +7,6 @@ import { FunctionInfo } from './types';
  * Configuration for code generation
  */
 export interface GenerationConfig {
-    /** Directory to store generated files */
-    outputDir: string;
-    
     /** Whether to keep generated files after synthesis */
     keepFiles: boolean;
     
@@ -49,6 +46,14 @@ export interface SynthProjectInfo {
 }
 
 /**
+ * Port annotation for the Synthesize pragma.
+ * Simple ports use PortName; compound types like DiffClock use PortProduct.
+ */
+export type PortAnnotation =
+    | { kind: 'name'; name: string }
+    | { kind: 'product'; name: string; subPorts: string[] };
+
+/**
  * Generates Clash wrapper modules for synthesizing functions.
  *
  * Instead of standalone .hs files, the generator maintains a small cabal
@@ -65,10 +70,11 @@ export class CodeGenerator {
     /**
      * Generate a wrapper module for a function.
      *
-     * Also writes the wrapper into the synth-project source tree.
+     * Writes the wrapper into the synth-project source tree
+     * (`<workspace>/.clash/synth-project/src/`).
      *
      * @param func           Function to wrap
-     * @param config         Generation configuration (outputDir = 01-haskell dir)
+     * @param config         Generation configuration
      * @param workspaceRoot  VS Code workspace root (where `.clash/` lives)
      */
     async generateWrapper(
@@ -83,9 +89,6 @@ export class CodeGenerator {
         this.outputChannel.appendLine(`Function: ${func.name}`);
         this.outputChannel.appendLine(`Type: ${func.typeSignature}`);
 
-        // Ensure output directory exists (this should be 01-haskell)
-        await this.ensureDirectory(config.outputDir);
-
         // Generate module name
         const moduleName = this.generateModuleName(func.name, config.modulePrefix);
         this.outputChannel.appendLine(`Module name: ${moduleName}`);
@@ -93,26 +96,38 @@ export class CodeGenerator {
         // Generate file content
         const content = this.generateWrapperContent(func, moduleName);
 
-        // Write to file
+        // Write the wrapper into the synth-project source tree so cabal
+        // can find it as a proper module.
+        const synthProjectRoot = CodeGenerator.getSynthProjectRoot(workspaceRoot);
+        const synthSrcDir = path.join(synthProjectRoot, 'src');
+        await this.ensureDirectory(synthSrcDir);
         const fileName = `${moduleName}.hs`;
-        const filePath = path.join(config.outputDir, fileName);
-        
-        await fs.writeFile(filePath, content, 'utf8');
-        this.outputChannel.appendLine(`Generated: ${filePath}`);
+        const filePath = path.join(synthSrcDir, fileName);
+
+        // Remove any stale wrappers left from previous syntheses of a different
+        // function.  Leaving them around causes two problems:
+        //   1. The clash-synth.cabal exposed-modules list goes stale, making
+        //      cabal complain about missing source files or wrong dependencies.
+        //   2. Cabal may try to compile modules whose user-package dependency
+        //      no longer matches the current synthesis target.
+        try {
+            const existing = await fs.readdir(synthSrcDir);
+            for (const f of existing) {
+                if (f.endsWith('.hs') && f !== fileName) {
+                    await fs.unlink(path.join(synthSrcDir, f));
+                    this.outputChannel.appendLine(`Removed stale wrapper: ${f}`);
+                }
+            }
+        } catch { /* synthSrcDir may not exist yet; ensureDirectory above handles it */ }
+
+        const written = await this.writeIfChanged(filePath, content);
+        this.outputChannel.appendLine(written ? `Generated: ${filePath}` : `Unchanged: ${filePath}`);
         this.outputChannel.appendLine('');
         this.outputChannel.appendLine('File content preview:');
         this.outputChannel.appendLine('-'.repeat(60));
         const preview = content.length > 1000 ? content.substring(0, 1000) + '\n... (truncated)' : content;
         this.outputChannel.appendLine(preview);
         this.outputChannel.appendLine('-'.repeat(60));
-
-        // Also write the wrapper into the synth-project source tree so cabal
-        // can find it as a proper module.
-        const synthProjectRoot = CodeGenerator.getSynthProjectRoot(workspaceRoot);
-        const synthSrcDir = path.join(synthProjectRoot, 'src');
-        await this.ensureDirectory(synthSrcDir);
-        const synthFilePath = path.join(synthSrcDir, fileName);
-        await fs.writeFile(synthFilePath, content, 'utf8');
 
         return {
             filePath,
@@ -138,7 +153,14 @@ export class CodeGenerator {
      *    "clash" that depends on clash-ghc + the user's package (if any)
      *  - src/             → generated wrapper modules land here
      */
-    async ensureSynthProject(workspaceRoot: string, sourceFilePath: string): Promise<SynthProjectInfo> {
+    async ensureSynthProject(
+        workspaceRoot: string,
+        sourceFilePath: string,
+        /** The single wrapper module name that will be synthesized.
+         *  When supplied the cabal file is written with exactly this module,
+         *  rather than whatever stale files happen to be on disk. */
+        targetModuleName?: string
+    ): Promise<SynthProjectInfo> {
         const synthRoot = CodeGenerator.getSynthProjectRoot(workspaceRoot);
         await this.ensureDirectory(synthRoot);
         await this.ensureDirectory(path.join(synthRoot, 'src'));
@@ -146,8 +168,11 @@ export class CodeGenerator {
         // Walk up from the source file to find its cabal project (if any)
         const cabalProject = await CodeGenerator.findCabalProject(sourceFilePath);
 
-        // Collect the names of all wrapper modules currently in src/
-        const wrapperModules = await this.listWrapperModules(synthRoot);
+        // Use the known target module name when available so the cabal file is
+        // always correct, even before old wrappers are cleaned up.
+        const wrapperModules = targetModuleName
+            ? [targetModuleName]
+            : await this.listWrapperModules(synthRoot);
 
         let cabalProjectDir: string | null = null;
 
@@ -201,11 +226,11 @@ export class CodeGenerator {
                     ''
                 ].join('\n');
             }
-            await fs.writeFile(path.join(synthRoot, 'cabal.project'), cabalProjectContent, 'utf8');
+            await this.writeIfChanged(path.join(synthRoot, 'cabal.project'), cabalProjectContent);
 
             // Write clash-synth.cabal depending on the user's package
             const cabalFile = this.generateSynthCabalFile(cabalProject.packageName, wrapperModules);
-            await fs.writeFile(path.join(synthRoot, 'clash-synth.cabal'), cabalFile, 'utf8');
+            await this.writeIfChanged(path.join(synthRoot, 'clash-synth.cabal'), cabalFile);
         } else {
             this.outputChannel.appendLine('No cabal project found — standalone mode');
 
@@ -221,12 +246,12 @@ export class CodeGenerator {
                 'write-ghc-environment-files: always',
                 ''
             ].join('\n');
-            await fs.writeFile(path.join(synthRoot, 'cabal.project'), cabalProjectContent, 'utf8');
+            await this.writeIfChanged(path.join(synthRoot, 'cabal.project'), cabalProjectContent);
 
             // Write clash-synth.cabal without user package dep but with
             // the source directory added to hs-source-dirs.
             const cabalFile = this.generateSynthCabalFile(null, wrapperModules, [sourceDir]);
-            await fs.writeFile(path.join(synthRoot, 'clash-synth.cabal'), cabalFile, 'utf8');
+            await this.writeIfChanged(path.join(synthRoot, 'clash-synth.cabal'), cabalFile);
         }
 
         // Write a minimal Clash.hs main for the executable
@@ -240,7 +265,7 @@ export class CodeGenerator {
             'main = defaultMain =<< getArgs',
             ''
         ].join('\n');
-        await fs.writeFile(path.join(binDir, 'Clash.hs'), clashMain, 'utf8');
+        await this.writeIfChanged(path.join(binDir, 'Clash.hs'), clashMain);
 
         this.outputChannel.appendLine(`Synth project ready at: ${synthRoot}`);
         return { synthRoot, cabalProjectDir };
@@ -423,9 +448,21 @@ export class CodeGenerator {
     }
 
     /**
+     * A port annotation: either a simple PortName or a PortProduct
+     * for compound types like DiffClock.
+     */
+    static formatPortAnnotation(port: PortAnnotation): string {
+        if (port.kind === 'product') {
+            const subs = port.subPorts.map(s => `PortName "${s}"`).join(', ');
+            return `PortProduct "${port.name}" [${subs}]`;
+        }
+        return `PortName "${port.name}"`;
+    }
+
+    /**
      * Generate port names from type signature
      */
-    private generatePortNames(typeSignature: string): { inputs: string[], output: string } {
+    private generatePortNames(typeSignature: string): { inputs: PortAnnotation[], output: string } {
         // Split by -> to get argument types
         const parts = typeSignature.split('->').map(s => s.trim());
         
@@ -437,49 +474,56 @@ export class CodeGenerator {
         const output = 'OUT';
         
         // Generate input port names
-        const inputs: string[] = [];
+        const inputs: PortAnnotation[] = [];
         for (let i = 0; i < parts.length - 1; i++) {
             // Try to derive a meaningful name from the type
             const typeName = parts[i];
-            const portName = this.derivePortName(typeName, i);
-            inputs.push(portName);
+            const port = this.derivePortAnnotation(typeName, i);
+            inputs.push(port);
         }
 
         return { inputs, output };
     }
 
     /**
-     * Derive a port name from a type
+     * Derive a port annotation from a type.
+     * Most types get a simple PortName; compound types like DiffClock
+     * require a PortProduct so Clash can split their sub-signals.
      */
-    private derivePortName(typeName: string, index: number): string {
+    private derivePortAnnotation(typeName: string, index: number): PortAnnotation {
         // Remove parentheses and extract the base type
         const cleaned = typeName.replace(/[()]/g, '').trim();
         
+        // DiffClock needs PortProduct with p/n sub-ports
+        if (cleaned.includes('DiffClock')) {
+            return { kind: 'product', name: 'CLK', subPorts: ['p', 'n'] };
+        }
+
         // Common patterns
         if (cleaned.includes('Clock')) {
-            return 'CLK';
+            return { kind: 'name', name: 'CLK' };
         }
         if (cleaned.includes('Reset')) {
-            return 'RST';
+            return { kind: 'name', name: 'RST' };
         }
         if (cleaned.includes('Enable')) {
-            return 'EN';
+            return { kind: 'name', name: 'EN' };
         }
         
         // Generic names
         const letter = String.fromCharCode(65 + index); // A, B, C, ...
-        return `IN${letter}`;
+        return { kind: 'name', name: `IN${letter}` };
     }
 
     /**
-     * Format a list of port names for the annotation
+     * Format a list of port annotations for the Synthesize annotation
      */
-    private formatPortList(ports: string[]): string {
+    private formatPortList(ports: PortAnnotation[]): string {
         if (ports.length === 0) {
             return '[]';
         }
         
-        const formatted = ports.map(p => `PortName "${p}"`).join('\n                 , ');
+        const formatted = ports.map(p => CodeGenerator.formatPortAnnotation(p)).join('\n                 , ');
         return `[ ${formatted}\n                 ]`;
     }
 
@@ -504,6 +548,25 @@ export class CodeGenerator {
     }
 
     /**
+     * Write `content` to `filePath` only when the on-disk content differs.
+     * Returns true if the file was written, false if it was already up-to-date.
+     * This preserves the file's mtime when nothing changed, which prevents
+     * cabal from seeing the project files as dirty and triggering a rebuild.
+     */
+    private async writeIfChanged(filePath: string, content: string): Promise<boolean> {
+        try {
+            const existing = await fs.readFile(filePath, 'utf8');
+            if (existing === content) {
+                return false;
+            }
+        } catch {
+            // File doesn't exist yet — fall through to write.
+        }
+        await fs.writeFile(filePath, content, 'utf8');
+        return true;
+    }
+
+    /**
      * Ensure a directory exists, create if it doesn't
      */
     private async ensureDirectory(dirPath: string): Promise<void> {
@@ -524,9 +587,8 @@ export class CodeGenerator {
     /**
      * Get default generation config for a workspace
      */
-    static getDefaultConfig(workspaceRoot: string): GenerationConfig {
+    static getDefaultConfig(): GenerationConfig {
         return {
-            outputDir: path.join(workspaceRoot, '.clash'),
             keepFiles: false,
             modulePrefix: 'ClashSynth_'
         };
@@ -605,7 +667,6 @@ export class CodeGenerator {
      */
     static getProjectDirectories(workspaceRoot: string, func: FunctionInfo): {
         root: string;
-        haskell: string;
         verilog: string;
         yosys: string;
         nextpnr: string;
@@ -619,7 +680,6 @@ export class CodeGenerator {
         
         return {
             root: projectRoot,
-            haskell: path.join(projectRoot, '01-haskell'),
             verilog: path.join(projectRoot, '02-verilog'),
             yosys: path.join(projectRoot, '03-yosys'),
             nextpnr: path.join(projectRoot, '04-nextpnr')
@@ -629,12 +689,18 @@ export class CodeGenerator {
     /**
      * Clean up generated files
      */
-    async cleanup(config: GenerationConfig): Promise<void> {
+    /**
+     * Clean up generated wrapper files from the synth project source tree.
+     */
+    async cleanup(workspaceRoot: string): Promise<void> {
         try {
-            const files = await fs.readdir(config.outputDir);
+            const synthSrcDir = path.join(
+                CodeGenerator.getSynthProjectRoot(workspaceRoot), 'src'
+            );
+            const files = await fs.readdir(synthSrcDir);
             for (const file of files) {
                 if (file.endsWith('.hs')) {
-                    const filePath = path.join(config.outputDir, file);
+                    const filePath = path.join(synthSrcDir, file);
                     await fs.unlink(filePath);
                     this.outputChannel.appendLine(`Deleted: ${filePath}`);
                 }

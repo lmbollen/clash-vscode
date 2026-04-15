@@ -1,9 +1,10 @@
 import * as vscode from 'vscode';
-import { spawn } from 'child_process';
+import { spawn, SpawnOptions } from 'child_process';
 import * as path from 'path';
-import { promises as fs } from 'fs';
+import { promises as fs, createWriteStream, WriteStream } from 'fs';
 import { ClashManifestParser } from './clash-manifest-parser';
 import { ParsedClashManifest } from './clash-manifest-types';
+import { getLogger } from './file-logger';
 
 /**
  * Result of Clash compilation
@@ -63,27 +64,30 @@ export class ClashCompiler {
 		
 		return new Promise((resolve) => {
 			// Run in workspace directory if provided (important for direnv/nix-shell)
-			const spawnOptions: any = {
+			const spawnOptions: SpawnOptions = {
 				timeout: 10000
 			};
 			if (workspaceRoot) {
 				spawnOptions.cwd = workspaceRoot;
 			}
 			
+			const logger = getLogger();
+			const finishLog = logger?.command(command, args, workspaceRoot);
 			const process = spawn(command, args, spawnOptions);
-			
+
 			let stdout = '';
 			let stderr = '';
-			
-			process.stdout.on('data', (data) => {
+
+			process.stdout?.on('data', (data) => {
 				stdout += data.toString();
 			});
-			
-			process.stderr.on('data', (data) => {
+
+			process.stderr?.on('data', (data) => {
 				stderr += data.toString();
 			});
 			
-			process.on('close', (code) => {
+			process.on('close', async (code) => {
+				finishLog?.then(fn => fn(code));
 				const output = stdout + stderr;
 				// Consider it successful if:
 				// 1. Exit code is 0, OR
@@ -188,7 +192,28 @@ export class ClashCompiler {
 		this.outputChannel.appendLine(`Running: ${command} ${args.join(' ')}`);
 		this.outputChannel.appendLine('');
 
+		// Open a persistent build log alongside the output channel so the
+		// full Clash output is never lost when the channel scrolls past it.
+		const buildLogPath = path.join(options.workspaceRoot, '.clash', 'clash-build.log');
+		let logStream: WriteStream | undefined;
+		try {
+			await fs.mkdir(path.dirname(buildLogPath), { recursive: true });
+			logStream = createWriteStream(buildLogPath, { flags: 'w' });
+			logStream.write(`Clash Build Log\n`);
+			logStream.write(`Time:    ${new Date().toISOString()}\n`);
+			logStream.write(`Command: ${command} ${args.join(' ')}\n`);
+			logStream.write(`CWD:     ${cwd}\n`);
+			logStream.write(`${'='.repeat(60)}\n\n`);
+		} catch {
+			// If we can't open the log file, continue without it.
+			logStream = undefined;
+		}
+		this.outputChannel.appendLine(`Build log: ${buildLogPath}`);
+		this.outputChannel.appendLine('');
+
 		return new Promise((resolve) => {
+			const logger = getLogger();
+			const finishLog = logger?.command(command, args, cwd);
 			const clash = spawn(command, args, {
 				cwd,
 				env: process.env
@@ -203,13 +228,15 @@ export class ClashCompiler {
 				const text = data.toString();
 				stdout += text;
 				this.outputChannel.append(text);
+				logStream?.write(text);
 			});
 
 			clash.stderr.on('data', (data) => {
 				const text = data.toString();
 				stderr += text;
 				this.outputChannel.append(text);
-				
+				logStream?.write(text);
+
 				// Parse for errors and warnings
 				if (text.toLowerCase().includes('error')) {
 					errors.push(text.trim());
@@ -222,6 +249,7 @@ export class ClashCompiler {
 			clash.on('error', (error) => {
 				this.outputChannel.appendLine(`\nERROR: Failed to spawn Clash command: ${error.message}`);
 				this.outputChannel.appendLine(`Command: ${command} ${args.join(' ')}`);
+				logStream?.end(`\nERROR: ${error.message}\n`);
 				resolve({
 					success: false,
 					errors: [error.message],
@@ -231,6 +259,8 @@ export class ClashCompiler {
 			});
 
 			clash.on('close', async (code) => {
+				finishLog?.then(fn => fn(code));
+				logStream?.end(`\n${'='.repeat(60)}\nExit code: ${code}\n`);
 				this.outputChannel.appendLine('');
 				this.outputChannel.appendLine(`Clash exited with code ${code}`);
 				

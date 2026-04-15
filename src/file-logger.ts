@@ -10,12 +10,14 @@ export class FileLogger {
     private enabled: boolean = true;
 
     constructor(workspaceRoot: string) {
-        this.logFilePath = path.join(workspaceRoot, '.clash-vscode-debug.log');
+        this.logFilePath = path.join(workspaceRoot, '.clash', 'debug.log');
         this.init();
     }
 
     private async init() {
         try {
+            // Ensure .clash directory exists
+            await fs.mkdir(path.dirname(this.logFilePath), { recursive: true });
             // Create/truncate log file on start
             const timestamp = new Date().toISOString();
             await fs.writeFile(this.logFilePath, `=== Clash VS Code Extension Debug Log ===\n`);
@@ -79,6 +81,21 @@ export class FileLogger {
             msg += ` - ${details}`;
         }
         await this.appendToFile(msg);
+    }
+
+    /**
+     * Log an external tool invocation (command, args, cwd).
+     * Returns a finish callback that records exit code and duration.
+     */
+    async command(cmd: string, args: string[], cwd?: string): Promise<(code: number | null) => Promise<void>> {
+        const start = Date.now();
+        const cmdLine = `${cmd} ${args.join(' ')}`;
+        await this.appendToFile(`[CMD] ${cmdLine}${cwd ? `  (cwd: ${cwd})` : ''}`);
+        return async (code: number | null) => {
+            const elapsed = Date.now() - start;
+            const status = code === 0 ? 'OK' : `FAIL(${code})`;
+            await this.appendToFile(`[CMD] ${status} ${elapsed}ms  ${cmd}`);
+        };
     }
 
     getLogPath(): string {

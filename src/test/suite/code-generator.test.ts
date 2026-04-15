@@ -1,5 +1,6 @@
 import * as assert from 'assert';
 import * as path from 'path';
+import { promises as fsp } from 'fs';
 import * as vscode from 'vscode';
 import { CodeGenerator, GenerationConfig } from '../../code-generator';
 import { FunctionInfo } from '../../types';
@@ -53,7 +54,6 @@ suite('Code Generator Test Suite', () => {
 		}
 
 		const config: GenerationConfig = {
-			outputDir: tempDir,
 			keepFiles: true,
 			modulePrefix: 'ClashSynth_'
 		};
@@ -95,7 +95,6 @@ suite('Code Generator Test Suite', () => {
 		}
 
 		const config: GenerationConfig = {
-			outputDir: tempDir,
 			keepFiles: true,
 			modulePrefix: 'Test_'
 		};
@@ -127,7 +126,6 @@ suite('Code Generator Test Suite', () => {
 		}
 
 		const config: GenerationConfig = {
-			outputDir: tempDir,
 			keepFiles: true,
 			modulePrefix: 'Test_'
 		};
@@ -139,6 +137,53 @@ suite('Code Generator Test Suite', () => {
 		assert.ok(result.content.includes('CLK'), 'Should have CLK port');
 		assert.ok(result.content.includes('RST'), 'Should have RST port');
 		assert.ok(result.content.includes('EN'), 'Should have EN port');
+	});
+
+	test('Should use PortProduct for DiffClock', async function() {
+		this.timeout(10000);
+
+		const testFunction: FunctionInfo = {
+			name: 'topEntity',
+			range: new vscode.Range(0, 0, 0, 0),
+			typeSignature: 'DiffClock "Basic625" -> Signal "Basic625" (Unsigned 8) -> Signal "Basic625" (Unsigned 8)',
+			isMonomorphic: true,
+			filePath: '/test/Example/Project.hs',
+			moduleName: 'Example.Project'
+		};
+
+		if (!tempDir) {
+			this.skip();
+			return;
+		}
+
+		const config: GenerationConfig = {
+			keepFiles: true,
+			modulePrefix: 'Test_'
+		};
+
+		const wsRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '/tmp';
+		const result = await codeGenerator.generateWrapper(testFunction, config, wsRoot);
+
+		// DiffClock must use PortProduct, not PortName
+		assert.ok(
+			result.content.includes('PortProduct "CLK" [PortName "p", PortName "n"]'),
+			'DiffClock should produce PortProduct with p/n sub-ports'
+		);
+		// Should NOT have a bare PortName "CLK" for the DiffClock port
+		assert.ok(
+			!result.content.includes('PortName "CLK"'),
+			'DiffClock should NOT use PortName for the clock port'
+		);
+	});
+
+	test('formatPortAnnotation: PortName', () => {
+		const result = CodeGenerator.formatPortAnnotation({ kind: 'name', name: 'RST' });
+		assert.strictEqual(result, 'PortName "RST"');
+	});
+
+	test('formatPortAnnotation: PortProduct', () => {
+		const result = CodeGenerator.formatPortAnnotation({ kind: 'product', name: 'CLK', subPorts: ['p', 'n'] });
+		assert.strictEqual(result, 'PortProduct "CLK" [PortName "p", PortName "n"]');
 	});
 
 	test('Should generate snake_case synthesis names', async function() {
@@ -159,7 +204,6 @@ suite('Code Generator Test Suite', () => {
 		}
 
 		const config: GenerationConfig = {
-			outputDir: tempDir,
 			keepFiles: true,
 			modulePrefix: 'Test_'
 		};
@@ -188,7 +232,6 @@ suite('Code Generator Test Suite', () => {
 		}
 
 		const config: GenerationConfig = {
-			outputDir: tempDir,
 			keepFiles: true,
 			modulePrefix: 'ClashSynth_'
 		};
@@ -212,7 +255,6 @@ suite('Code Generator Test Suite', () => {
 
 		const dirs = CodeGenerator.getProjectDirectories('/workspace', func);
 		assert.ok(dirs.root.includes('Example.Module.myFunc'));
-		assert.ok(dirs.haskell.includes('01-haskell'));
 		assert.ok(dirs.verilog.includes('02-verilog'));
 		assert.ok(dirs.yosys.includes('03-yosys'));
 		assert.ok(dirs.nextpnr.includes('04-nextpnr'));
@@ -256,7 +298,6 @@ suite('Code Generator Test Suite', () => {
 		const synthInfo = await codeGenerator.ensureSynthProject(wsRoot, sourceFile);
 
 		// Verify the synth project was created
-		const { promises: fsp } = require('fs');
 		const cabalProjectContent = await fsp.readFile(
 			path.join(synthInfo.synthRoot, 'cabal.project'), 'utf8'
 		);
@@ -293,7 +334,6 @@ suite('Code Generator Test Suite', () => {
 		const sourceFile = '/tmp/Standalone.hs';
 		const synthInfo = await codeGenerator.ensureSynthProject(wsRoot, sourceFile);
 
-		const { promises: fsp } = require('fs');
 		const cabalProjectContent = await fsp.readFile(
 			path.join(synthInfo.synthRoot, 'cabal.project'), 'utf8'
 		);
@@ -329,7 +369,6 @@ suite('Code Generator Test Suite', () => {
 		}
 
 		const config: GenerationConfig = {
-			outputDir: tempDir,
 			keepFiles: true,
 			modulePrefix: 'ClashSynth_'
 		};
@@ -390,5 +429,140 @@ suite('Code Generator Test Suite', () => {
 
 		const result = await CodeGenerator.findCabalProjectFile('/tmp');
 		assert.strictEqual(result, null);
+	});
+
+	// ── Regression tests ────────────────────────────────────────────────────
+
+	/**
+	 * Regression: synthesizing function B after function A left A's wrapper
+	 * file on disk.  The stale module was still listed in clash-synth.cabal,
+	 * causing cabal to error about a missing dependency when the user's package
+	 * was no longer relevant to the new synthesis target.
+	 */
+	test('Regression: stale wrapper from previous function is removed', async function() {
+		this.timeout(15000);
+
+		const wsRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+		if (!wsRoot) { return this.skip(); }
+
+		const config: GenerationConfig = { keepFiles: true, modulePrefix: 'ClashSynth_' };
+
+		const funcA: FunctionInfo = {
+			name: 'regressionAlpha',
+			range: new vscode.Range(0, 0, 0, 0),
+			typeSignature: 'Int -> Int',
+			isMonomorphic: true,
+			filePath: '/tmp/Reg.hs',
+			moduleName: 'Reg'
+		};
+		const funcB: FunctionInfo = {
+			name: 'regressionBeta',
+			range: new vscode.Range(0, 0, 0, 0),
+			typeSignature: 'Bool -> Bool',
+			isMonomorphic: true,
+			filePath: '/tmp/Reg.hs',
+			moduleName: 'Reg'
+		};
+
+		const synthRoot = CodeGenerator.getSynthProjectRoot(wsRoot);
+		const srcDir   = path.join(synthRoot, 'src');
+		const wrapperA = path.join(srcDir, 'ClashSynth_RegressionAlpha.hs');
+		const wrapperB = path.join(srcDir, 'ClashSynth_RegressionBeta.hs');
+
+		// ── Step 1: synthesize function A ────────────────────────────────────
+		await codeGenerator.generateWrapper(funcA, config, wsRoot);
+		await codeGenerator.ensureSynthProject(wsRoot, funcA.filePath);
+
+		// A's wrapper must exist after the first synthesis
+		await fsp.access(wrapperA);  // throws if missing
+
+		// ── Step 2: synthesize function B ────────────────────────────────────
+		await codeGenerator.generateWrapper(funcB, config, wsRoot);
+		await codeGenerator.ensureSynthProject(wsRoot, funcB.filePath);
+
+		// A's wrapper must now be gone
+		let aStillExists = false;
+		try { await fsp.access(wrapperA); aStillExists = true; } catch {}
+		assert.strictEqual(aStillExists, false,
+			'ClashSynth_RegressionAlpha.hs should have been deleted when switching to function B');
+
+		// B's wrapper must exist
+		await fsp.access(wrapperB);  // throws if missing
+
+		// The cabal file must list B but not A
+		const cabalContent = await fsp.readFile(
+			path.join(synthRoot, 'clash-synth.cabal'), 'utf8'
+		);
+		assert.ok(cabalContent.includes('ClashSynth_RegressionBeta'),
+			'clash-synth.cabal should list ClashSynth_RegressionBeta');
+		assert.ok(!cabalContent.includes('ClashSynth_RegressionAlpha'),
+			'clash-synth.cabal must not list the stale ClashSynth_RegressionAlpha');
+	});
+
+	/**
+	 * Regression: every synthesis run unconditionally rewrote the wrapper .hs,
+	 * cabal.project, clash-synth.cabal, and bin/Clash.hs with identical content.
+	 * That dirtied the file mtimes and caused cabal to re-compile even though
+	 * nothing had changed, wasting significant build time.
+	 */
+	test('Regression: re-synthesizing the same function does not touch file mtimes', async function() {
+		this.timeout(15000);
+
+		const wsRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+		if (!wsRoot) { return this.skip(); }
+
+		const config: GenerationConfig = { keepFiles: true, modulePrefix: 'ClashSynth_' };
+		const sourceFile = path.join(wsRoot, 'src', 'Example', 'Project.hs');
+
+		const func: FunctionInfo = {
+			name: 'idempotentFunc',
+			range: new vscode.Range(0, 0, 0, 0),
+			typeSignature: 'Unsigned 8 -> Unsigned 8',
+			isMonomorphic: true,
+			filePath: sourceFile,
+			moduleName: 'Example.Project'
+		};
+
+		const synthRoot     = CodeGenerator.getSynthProjectRoot(wsRoot);
+		const wrapperPath   = path.join(synthRoot, 'src',  'ClashSynth_IdempotentFunc.hs');
+		const cabalProjPath = path.join(synthRoot,         'cabal.project');
+		const cabalFilePath = path.join(synthRoot,         'clash-synth.cabal');
+		const clashMainPath = path.join(synthRoot, 'bin',  'Clash.hs');
+
+		// ── First run: write everything for the first time ───────────────────
+		await codeGenerator.generateWrapper(func, config, wsRoot);
+		await codeGenerator.ensureSynthProject(wsRoot, sourceFile);
+
+		// Snapshot mtimes after the first write
+		const [mWrapper, mCabalProj, mCabalFile, mClashMain] = await Promise.all([
+			fsp.stat(wrapperPath).then(s => s.mtimeMs),
+			fsp.stat(cabalProjPath).then(s => s.mtimeMs),
+			fsp.stat(cabalFilePath).then(s => s.mtimeMs),
+			fsp.stat(clashMainPath).then(s => s.mtimeMs),
+		]);
+
+		// Wait long enough that any write would produce a different mtime
+		await new Promise<void>(r => setTimeout(r, 50));
+
+		// ── Second run: identical inputs, nothing should be rewritten ─────────
+		await codeGenerator.generateWrapper(func, config, wsRoot);
+		await codeGenerator.ensureSynthProject(wsRoot, sourceFile);
+
+		assert.strictEqual(
+			(await fsp.stat(wrapperPath)).mtimeMs, mWrapper,
+			'Wrapper .hs mtime must not change when re-synthesizing the same function'
+		);
+		assert.strictEqual(
+			(await fsp.stat(cabalProjPath)).mtimeMs, mCabalProj,
+			'cabal.project mtime must not change on re-synthesis'
+		);
+		assert.strictEqual(
+			(await fsp.stat(cabalFilePath)).mtimeMs, mCabalFile,
+			'clash-synth.cabal mtime must not change on re-synthesis'
+		);
+		assert.strictEqual(
+			(await fsp.stat(clashMainPath)).mtimeMs, mClashMain,
+			'bin/Clash.hs mtime must not change on re-synthesis'
+		);
 	});
 });

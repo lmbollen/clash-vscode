@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import { spawn } from 'child_process';
+import { getLogger } from './file-logger';
 
 /**
  * Represents the availability status of a single tool
@@ -65,6 +66,8 @@ export class ToolchainChecker {
             }
 
             try {
+                const logger = getLogger();
+                const finishLog = logger?.command(cmd, args, spawnOpts.cwd);
                 const proc = spawn(cmd, args, spawnOpts);
 
                 let stdout = '';
@@ -74,6 +77,7 @@ export class ToolchainChecker {
                 proc.stderr.on('data', (d) => { stderr += d.toString(); });
 
                 proc.on('close', (code) => {
+                    finishLog?.then(fn => fn(code));
                     const output = (stdout + stderr).trim();
                     const firstLine = output.split('\n')[0] || '';
 

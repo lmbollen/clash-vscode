@@ -10,6 +10,7 @@ import {
 	TimingInfo,
 	UtilizationInfo
 } from './nextpnr-types';
+import { getLogger } from './file-logger';
 
 /**
  * Handles nextpnr place-and-route execution
@@ -158,6 +159,8 @@ export class NextpnrRunner {
 			const warnings: NextpnrWarning[] = [];
 			const errors: NextpnrError[] = [];
 
+			const logger = getLogger();
+			const finishLog = logger?.command(executable, args);
 			const nextpnr = spawn(executable, args);
 
 			nextpnr.stdout.on('data', (data) => {
@@ -192,6 +195,7 @@ export class NextpnrRunner {
 			});
 
 			nextpnr.on('close', async (code) => {
+				finishLog?.then(fn => fn(code));
 				this.outputChannel.appendLine('');
 				this.outputChannel.appendLine(`nextpnr exited with code ${code}`);
 
@@ -318,6 +322,8 @@ export class NextpnrRunner {
 	private async runEcppack(textcfgPath: string, bitstreamPath: string): Promise<{ success: boolean }> {
 		return new Promise((resolve) => {
 			const args = [textcfgPath, bitstreamPath];
+			const logger = getLogger();
+			const finishLog = logger?.command('ecppack', args);
 			const ecppack = spawn('ecppack', args);
 
 			let output = '';
@@ -340,6 +346,7 @@ export class NextpnrRunner {
 			});
 
 			ecppack.on('close', async (code) => {
+				finishLog?.then(fn => fn(code));
 				// Save ecppack log
 				const logPath = path.join(path.dirname(bitstreamPath), 'ecppack.log');
 				try {

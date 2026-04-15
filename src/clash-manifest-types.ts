@@ -126,3 +126,18 @@ export interface ParsedClashManifest extends ClashManifest {
 	/** Target clock frequency in MHz (derived from primary domain period) */
 	targetFrequencyMHz?: number;
 }
+
+/**
+ * A single Clash component in a design's dependency graph.
+ * Used for out-of-context parallel synthesis.
+ */
+export interface ComponentInfo {
+	/** Top component name from manifest */
+	name: string;
+	/** Verilog files for this component */
+	verilogFiles: string[];
+	/** Names of direct dependency components */
+	dependencies: string[];
+	/** Directory containing the manifest */
+	directory: string;
+}

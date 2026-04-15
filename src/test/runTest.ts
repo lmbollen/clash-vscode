@@ -3,26 +3,26 @@ import { runTests } from '@vscode/test-electron';
 
 async function main() {
 	try {
-		// The folder containing the Extension Manifest package.json
 		const extensionDevelopmentPath = path.resolve(__dirname, '../../');
-
-		// The path to the test runner script
 		const extensionTestsPath = path.resolve(__dirname, './suite/index');
-
-		// The test workspace - our test-project
 		const testWorkspace = path.resolve(extensionDevelopmentPath, 'test-project');
 
-		// Download VS Code, unzip it and run the integration test
+		// In NixOS / headless environments the downloaded VS Code binary lacks the
+		// required system library wrappers.  Set VSCODE_EXECUTABLE_PATH to point at
+		// the nix-wrapped binary (e.g. the one from `vscode-fhs` in the devShell).
+		const vscodeExecutablePath = process.env.VSCODE_EXECUTABLE_PATH;
+
 		await runTests({
+			...(vscodeExecutablePath ? { vscodeExecutablePath } : {}),
 			extensionDevelopmentPath,
 			extensionTestsPath,
 			launchArgs: [
 				testWorkspace,
-				'--disable-workspace-trust'
+				'--disable-workspace-trust',
+				'--no-sandbox',         // required when running as root or in containers
+				'--disable-gpu',        // no GPU in CI / headless environments
+				'--headless',           // run without opening a window (VS Code 1.85+)
 			],
-			extensionTestsEnv: {
-				// Set any environment variables for tests
-			}
 		});
 	} catch (err) {
 		console.error('Failed to run tests:', err);

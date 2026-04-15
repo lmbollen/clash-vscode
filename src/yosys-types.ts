@@ -49,6 +49,31 @@ export interface YosysSynthesisResult {
 	
 	/** Parsed errors */
 	errors: YosysError[];
+
+	/** Per-module results when using parallel OOC synthesis */
+	moduleResults?: ModuleSynthesisResult[];
+}
+
+/**
+ * Result of synthesizing a single module in an OOC parallel flow
+ */
+export interface ModuleSynthesisResult {
+	/** Module name */
+	name: string;
+	/** Whether synthesis succeeded */
+	success: boolean;
+	/** Path to synthesized netlist (JSON) */
+	netlistPath?: string;
+	/** Path to RTLIL (.il) file (per-module mode) */
+	rtlilPath?: string;
+	/** Path to JSON for DigitalJS visualization (per-module mode) */
+	diagramJsonPath?: string;
+	/** Synthesis time in milliseconds */
+	elapsedMs: number;
+	/** Statistics for this module */
+	statistics?: SynthesisStatistics;
+	/** Errors */
+	errors: YosysError[];
 }
 
 /**
