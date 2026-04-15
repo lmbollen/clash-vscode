@@ -28,6 +28,27 @@
   ],
   "main": "./out/extension.js",
   "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "clash-synthesis",
+          "title": "Clash Synthesis",
+          "icon": "resources/clash-icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "clash-synthesis": [
+        {
+          "id": "clash-vscode-yosys.haskellFunctions",
+          "name": "Haskell Functions"
+        },
+        {
+          "id": "clash-vscode-yosys.synthesisResults",
+          "name": "Synthesis Results"
+        }
+      ]
+    },
     "commands": [
       {
         "command": "clash-vscode-yosys.detectFunctions",
@@ -35,17 +56,89 @@
       },
       {
         "command": "clash-vscode-yosys.synthesizeFunction",
-        "title": "Clash: Synthesize Function to Verilog"
+        "title": "Clash: Generate Verilog",
+        "icon": "$(file-code)"
+      },
+      {
+        "command": "clash-vscode-yosys.synthesizeOnly",
+        "title": "Clash: Synthesize",
+        "icon": "$(circuit-board)"
       },
       {
         "command": "clash-vscode-yosys.synthesizeAndPnR",
-        "title": "Clash: Synthesize and Place & Route"
+        "title": "Clash: Synthesize and Place & Route",
+        "icon": "$(layers)"
       },
       {
         "command": "clash-vscode-yosys.checkToolchain",
         "title": "Clash: Check Toolchain"
+      },
+      {
+        "command": "clash-vscode-yosys.openResultsPanel",
+        "title": "Clash: Open Synthesis Results Panel",
+        "icon": "$(open-preview)"
+      },
+      {
+        "command": "clash-vscode-yosys.runTests",
+        "title": "Clash: Run Extension Tests",
+        "icon": "$(beaker)"
+      },
+      {
+        "command": "clash-vscode-yosys.refreshHaskellFunctions",
+        "title": "Clash: Refresh Haskell Functions",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "clash-vscode-yosys.viewModuleDiagram",
+        "title": "Clash: View Module Diagram",
+        "icon": "$(open-preview)"
+      },
+      {
+        "command": "clash-vscode-yosys.goToFunction",
+        "title": "Clash: Go To Function"
       }
     ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "clash-vscode-yosys.synthesizeFunction",
+          "when": "view == clash-vscode-yosys.haskellFunctions",
+          "group": "navigation@1"
+        },
+        {
+          "command": "clash-vscode-yosys.synthesizeOnly",
+          "when": "view == clash-vscode-yosys.haskellFunctions",
+          "group": "navigation@2"
+        },
+        {
+          "command": "clash-vscode-yosys.synthesizeAndPnR",
+          "when": "view == clash-vscode-yosys.haskellFunctions",
+          "group": "navigation@3"
+        },
+        {
+          "command": "clash-vscode-yosys.refreshHaskellFunctions",
+          "when": "view == clash-vscode-yosys.haskellFunctions",
+          "group": "navigation@4"
+        },
+        {
+          "command": "clash-vscode-yosys.openResultsPanel",
+          "when": "view == clash-vscode-yosys.synthesisResults",
+          "group": "navigation"
+        },
+        {
+          "command": "clash-vscode-yosys.runTests",
+          "when": "view == clash-vscode-yosys.synthesisResults",
+          "group": "navigation"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "clash-vscode-yosys.viewModuleDiagram",
+          "when": "view == clash-vscode-yosys.synthesisResults && viewItem == synthesisModuleWithDiagram",
+          "group": "inline"
+        }
+      ]
+    },
     "configuration": {
       "title": "Clash Verilog Yosys",
       "properties": {
@@ -73,6 +166,15 @@
           "type": "boolean",
           "default": false,
           "description": "Show schematic visualization after Yosys synthesis"
+        },
+        "clash-vscode-yosys.synthesisMode": {
+          "type": "string",
+          "enum": [
+            "whole-design",
+            "per-module"
+          ],
+          "default": "per-module",
+          "description": "Synthesis mode: whole-design synthesizes everything at once; per-module synthesizes each component separately with individual diagrams"
         }
       }
     }
@@ -83,7 +185,7 @@
     "watch": "tsc -watch -p ./",
     "pretest": "npm run compile && npm run lint",
     "lint": "eslint src",
-    "test": "node ./out/test/runTest.js",
+    "test": "VSCODE_EXECUTABLE_PATH=${VSCODE_EXECUTABLE_PATH:-code} node ./out/test/runTest.js",
     "test:unit": "echo 'Unit tests require running in VS Code test environment. Use F5 with Extension Tests configuration.'"
   },
   "devDependencies": {

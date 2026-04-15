@@ -18,7 +18,8 @@ export class FunctionDetector {
     }
 
     /**
-     * Detect all functions in a document
+     * Detect all functions in a document with full diagnostic logging.
+     * Use this for explicit user-triggered commands ("Detect Functions").
      */
     async detectFunctions(document: vscode.TextDocument): Promise<FunctionInfo[]> {
         if (!this.hlsClient.isHaskellDocument(document)) {
@@ -27,21 +28,16 @@ export class FunctionDetector {
         }
 
         this.outputChannel.appendLine(`Detecting functions in ${document.fileName}...`);
-        this.outputChannel.appendLine(`Document language ID: ${document.languageId}`);
 
-        // Get all symbols from the document
-        const symbols = await this.hlsClient.getDocumentSymbols(document);
-        
-        this.outputChannel.appendLine(`Received ${symbols.length} symbols from HLS`);
-        
-        // Debug: log all symbols and their kinds
+        // Verbose fetch: bypasses cache and logs diagnostics.
+        const symbols = await this.hlsClient.getDocumentSymbolsVerbose(document);
+
         if (symbols.length > 0) {
             this.outputChannel.appendLine('Symbols found:');
             for (const symbol of symbols) {
                 this.outputChannel.appendLine(
                     `  - ${symbol.name} (kind: ${this.getSymbolKindName(symbol.kind)}, children: ${symbol.children?.length ?? 0})`
                 );
-                // Also check children
                 if (symbol.children && symbol.children.length > 0) {
                     for (const child of symbol.children) {
                         this.outputChannel.appendLine(
@@ -57,22 +53,14 @@ export class FunctionDetector {
             this.outputChannel.appendLine('   3. Haskell extension is not active');
             this.outputChannel.appendLine('   Try: Save the file, wait a moment, and run the command again');
         }
-        
-        // Filter to only functions and get their info
+
         const functions: FunctionInfo[] = [];
         const moduleName = await this.hlsClient.getModuleName(document);
 
-        // Helper function to recursively extract functions from symbols and their children
-        const extractFunctions = async (symbols: vscode.DocumentSymbol[]) => {
-            for (const symbol of symbols) {
-                // Check if this symbol itself is a function
+        const extractFunctions = async (syms: vscode.DocumentSymbol[]) => {
+            for (const symbol of syms) {
                 if (this.isFunction(symbol)) {
-                    const functionInfo = await this.analyzeFunctionSymbol(
-                        symbol, 
-                        document, 
-                        moduleName
-                    );
-                    
+                    const functionInfo = await this.analyzeFunctionSymbol(symbol, document, moduleName);
                     if (functionInfo) {
                         functions.push(functionInfo);
                         this.outputChannel.appendLine(
@@ -81,8 +69,6 @@ export class FunctionDetector {
                         );
                     }
                 }
-                
-                // Recursively check children
                 if (symbol.children && symbol.children.length > 0) {
                     await extractFunctions(symbol.children);
                 }
@@ -90,9 +76,61 @@ export class FunctionDetector {
         };
 
         await extractFunctions(symbols);
-
         this.outputChannel.appendLine(`Detected ${functions.length} functions`);
         return functions;
+    }
+
+    /**
+     * Find the function at a cursor position with minimal HLS interaction.
+     *
+     * Uses the cached symbol list (1 request, often free) to locate the
+     * symbol under the cursor, then fires a single hover request for just
+     * that symbol.  This is safe to call from provideCodeActions which runs
+     * on every cursor move.
+     */
+    async getFunctionAtPosition(
+        document: vscode.TextDocument,
+        position: vscode.Position
+    ): Promise<FunctionInfo | undefined> {
+        // Cached — no HLS round-trip when the document hasn't changed.
+        const symbols = await this.hlsClient.getDocumentSymbols(document);
+
+        // Flatten symbols + children into a single list.
+        const allSymbols: vscode.DocumentSymbol[] = [];
+        const flatten = (syms: vscode.DocumentSymbol[]) => {
+            for (const s of syms) {
+                allSymbols.push(s);
+                if (s.children?.length) { flatten(s.children); }
+            }
+        };
+        flatten(symbols);
+
+        // Find the innermost function symbol whose range contains the cursor.
+        const candidates = allSymbols.filter(
+            s => this.isFunction(s) && s.range.contains(position)
+        );
+        if (candidates.length === 0) { return undefined; }
+
+        // Prefer the narrowest range (innermost symbol).
+        const symbol = candidates.reduce((best, s) =>
+            s.range.start.isAfterOrEqual(best.range.start) &&
+            s.range.end.isBeforeOrEqual(best.range.end) ? s : best
+        );
+
+        // Single hover request only for this one symbol.
+        const hovers = await this.hlsClient.getHoverInfo(document, symbol.range.start);
+        const typeSignature = this.hlsClient.extractTypeSignature(hovers);
+        const isMonomorphic = typeSignature ? this.typeAnalyzer.isMonomorphic(typeSignature) : false;
+        const moduleName = await this.hlsClient.getModuleName(document);
+
+        return {
+            name: symbol.name,
+            range: symbol.range,
+            typeSignature,
+            isMonomorphic,
+            filePath: document.fileName,
+            moduleName
+        };
     }
 
     /**

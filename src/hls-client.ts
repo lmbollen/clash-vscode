@@ -12,32 +12,60 @@ import * as path from 'path';
 export class HLSClient {
     private outputChannel: vscode.OutputChannel;
 
+    /** Cache of document symbols keyed by URI + document version. */
+    private symbolCache = new Map<string, { version: number; symbols: vscode.DocumentSymbol[] }>();
+
     constructor(outputChannel: vscode.OutputChannel) {
         this.outputChannel = outputChannel;
     }
 
     /**
-     * Get all symbols in a document
-     * This uses VS Code's document symbol provider which talks to HLS
+     * Get all symbols in a document, caching by document version so repeated
+     * calls (e.g. from code-action providers on every cursor move) don't
+     * hammer HLS with redundant requests.
      */
     async getDocumentSymbols(document: vscode.TextDocument): Promise<vscode.DocumentSymbol[]> {
+        const cacheKey = document.uri.toString();
+        const cached = this.symbolCache.get(cacheKey);
+        if (cached && cached.version === document.version) {
+            return cached.symbols;
+        }
+
         try {
-            this.outputChannel.appendLine(`[HLS] Requesting symbols for ${document.fileName}...`);
-            
             const symbols = await vscode.commands.executeCommand<vscode.DocumentSymbol[]>(
                 'vscode.executeDocumentSymbolProvider',
                 document.uri
             );
-            
-            this.outputChannel.appendLine(`[HLS] Received ${symbols?.length ?? 0} symbols`);
-            
-            if (!symbols || symbols.length === 0) {
+            const result = symbols || [];
+            this.symbolCache.set(cacheKey, { version: document.version, symbols: result });
+            return result;
+        } catch (error) {
+            this.outputChannel.appendLine(`[HLS] Error getting document symbols: ${error}`);
+            return [];
+        }
+    }
+
+    /**
+     * Like getDocumentSymbols, but bypasses the cache and logs diagnostic
+     * output.  Use this for explicit user-triggered detection commands.
+     */
+    async getDocumentSymbolsVerbose(document: vscode.TextDocument): Promise<vscode.DocumentSymbol[]> {
+        this.outputChannel.appendLine(`[HLS] Requesting symbols for ${document.fileName}...`);
+        try {
+            const symbols = await vscode.commands.executeCommand<vscode.DocumentSymbol[]>(
+                'vscode.executeDocumentSymbolProvider',
+                document.uri
+            );
+            const result = symbols || [];
+            this.outputChannel.appendLine(`[HLS] Received ${result.length} symbols`);
+            if (result.length === 0) {
                 this.outputChannel.appendLine('[HLS] WARNING: No symbols returned. HLS may not be ready or file not indexed.');
                 this.outputChannel.appendLine(`[HLS] Document language: ${document.languageId}`);
                 this.outputChannel.appendLine(`[HLS] Document URI: ${document.uri.toString()}`);
             }
-            
-            return symbols || [];
+            // Warm the cache while we're here.
+            this.symbolCache.set(document.uri.toString(), { version: document.version, symbols: result });
+            return result;
         } catch (error) {
             this.outputChannel.appendLine(`[HLS] Error getting document symbols: ${error}`);
             return [];

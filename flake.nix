@@ -52,7 +52,7 @@
             
             # FPGA place-and-route tools
             nextpnr  # nextpnr-ice40, nextpnr-ecp5, etc.
-            prjtrellis  # ECP5 toolchain (includes ecppack)
+            trellis  # ECP5 toolchain (includes ecppack)
             
             # Useful utilities
             git

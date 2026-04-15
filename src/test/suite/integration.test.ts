@@ -6,6 +6,7 @@ import { CodeGenerator, GenerationConfig } from '../../code-generator';
 import { ClashCompiler } from '../../clash-compiler';
 import { YosysRunner } from '../../yosys-runner';
 import { NextpnrRunner } from '../../nextpnr-runner';
+import { ClashManifestParser } from '../../clash-manifest-parser';
 import { FunctionInfo } from '../../types';
 
 
@@ -32,12 +33,13 @@ suite('Integration: Full Synthesis + PnR Flow', () => {
 	let allVerilogFiles: string[] | undefined;
 	let topModule: string;
 	let yosysJsonPath: string;
+	let manifestPath: string | undefined;
 
 	/** The function we synthesize through the whole flow. */
 	const testFunc: FunctionInfo = {
-		name: 'plusSigned',
+		name: 'topEntity',
 		range: new vscode.Range(0, 0, 0, 0),
-		typeSignature: 'Signed 8 -> Signed 8 -> Signed 8',
+		typeSignature: 'Clock Dom50 -> Reset Dom50 -> Enable Dom50 -> Vec 8 (DSignal Dom50 0 (Unsigned 16)) -> DSignal Dom50 3 (Unsigned 16)',
 		isMonomorphic: true,
 		filePath: '', // set in suiteSetup
 		moduleName: 'Example.Project',
@@ -78,9 +80,7 @@ suite('Integration: Full Synthesis + PnR Flow', () => {
 	test('Step 1: Generate wrapper module', async function () {
 		this.timeout(15000);
 
-		const projectDirs = CodeGenerator.getProjectDirectories(wsRoot, testFunc);
 		const genConfig: GenerationConfig = {
-			outputDir: projectDirs.haskell,
 			keepFiles: true,
 			modulePrefix: 'ClashSynth_',
 		};
@@ -146,7 +146,7 @@ suite('Integration: Full Synthesis + PnR Flow', () => {
 		const projectDirs = CodeGenerator.getProjectDirectories(wsRoot, testFunc);
 
 		const result = await clashCompiler.compileToVerilog(
-			path.join(projectDirs.haskell, `${generatedModuleName}.hs`),
+			path.join(synthProjectRoot, 'src', `${generatedModuleName}.hs`),
 			{
 				workspaceRoot: wsRoot,
 				outputDir: projectDirs.root,
@@ -162,6 +162,7 @@ suite('Integration: Full Synthesis + PnR Flow', () => {
 
 		verilogPath = result.verilogPath!;
 		allVerilogFiles = result.allVerilogFiles;
+		manifestPath = result.manifest?.manifestPath;
 
 		// Determine top module from manifest or filename
 		if (result.manifest?.top_component?.name) {
@@ -187,13 +188,27 @@ suite('Integration: Full Synthesis + PnR Flow', () => {
 		const projectDirs = CodeGenerator.getProjectDirectories(wsRoot, testFunc);
 		const verilogInput = allVerilogFiles || verilogPath;
 
-		const result = await yosysRunner.synthesize({
-			workspaceRoot: wsRoot,
-			outputDir: projectDirs.yosys,
-			topModule,
-			verilogPath: verilogInput,
-			targetFamily: 'ecp5',
-		});
+		// Use parallel OOC synthesis when manifest is available
+		let result;
+		if (manifestPath) {
+			const parser = new ClashManifestParser();
+			const components = await parser.buildDependencyGraph(manifestPath);
+			result = await yosysRunner.synthesizeParallel(components, {
+				workspaceRoot: wsRoot,
+				outputDir: projectDirs.yosys,
+				topModule,
+				verilogPath: verilogInput,
+				targetFamily: 'ecp5',
+			});
+		} else {
+			result = await yosysRunner.synthesize({
+				workspaceRoot: wsRoot,
+				outputDir: projectDirs.yosys,
+				topModule,
+				verilogPath: verilogInput,
+				targetFamily: 'ecp5',
+			});
+		}
 
 		assert.ok(result.success, `Yosys synthesis should succeed.\nErrors: ${result.errors.map(e => e.message).join('\n')}`);
 		assert.ok(result.jsonPath, 'Should produce a JSON netlist');
@@ -210,6 +225,91 @@ suite('Integration: Full Synthesis + PnR Flow', () => {
 				result.statistics.cellCount === undefined || result.statistics.cellCount >= 0,
 				'Cell count should be non-negative'
 			);
+		}
+	});
+
+	// ---------------------------------------------------------------
+	// Step 4b: Parse SDC for target frequency
+	// ---------------------------------------------------------------
+
+	test('Step 4b: Parse SDC frequency from manifest directory', async function () {
+		this.timeout(15000);
+
+		if (!manifestPath) {
+			this.skip();
+			return;
+		}
+
+		const parser = new ClashManifestParser();
+		const manifestDir = path.dirname(manifestPath);
+		const freq = await parser.parseSdcFrequency(manifestDir);
+
+		// The test-project uses Dom50 (period 20000 ps = 20 ns = 50 MHz)
+		// SDC file should have period 20.000 ns → 50 MHz
+		if (freq !== undefined) {
+			assert.ok(freq > 0, 'Frequency should be positive');
+			assert.strictEqual(freq, 50, 'Dom50 should produce 50 MHz frequency from SDC');
+		}
+		// If no SDC exists that's also fine — the field is optional
+	});
+
+	// ---------------------------------------------------------------
+	// Step 4c: Per-module synthesis
+	// ---------------------------------------------------------------
+
+	test('Step 4c: Per-module synthesis produces individual .il and .json', async function () {
+		this.timeout(120_000);
+
+		assert.ok(verilogPath, 'Step 3 must have produced a Verilog path');
+
+		if (!manifestPath) {
+			this.skip();
+			return;
+		}
+
+		const projectDirs = CodeGenerator.getProjectDirectories(wsRoot, testFunc);
+		const parser = new ClashManifestParser();
+		const components = await parser.buildDependencyGraph(manifestPath);
+
+		if (components.length <= 1) {
+			// Single component — per-module falls back to regular synthesis
+			this.skip();
+			return;
+		}
+
+		const verilogInput = allVerilogFiles || verilogPath;
+
+		const result = await yosysRunner.synthesizePerModule(components, {
+			workspaceRoot: wsRoot,
+			outputDir: projectDirs.yosys,
+			topModule,
+			verilogPath: verilogInput,
+			targetFamily: 'ecp5',
+		});
+
+		assert.ok(result.success, `Per-module synthesis should succeed.\nErrors: ${result.errors.map(e => e.message).join('\n')}`);
+		assert.ok(result.moduleResults, 'Should have per-module results');
+		assert.strictEqual(result.moduleResults!.length, components.length, 'Should have one result per component');
+
+		// Verify each module produced its files
+		for (const mr of result.moduleResults!) {
+			assert.ok(mr.success, `Module ${mr.name} should succeed`);
+			assert.ok(mr.elapsedMs >= 0, `${mr.name} elapsedMs should be non-negative`);
+
+			if (mr.rtlilPath) {
+				const stat = await fs.stat(mr.rtlilPath);
+				assert.ok(stat.size > 0, `${mr.name} .il file should be non-empty`);
+			}
+
+			if (mr.diagramJsonPath) {
+				const stat = await fs.stat(mr.diagramJsonPath);
+				assert.ok(stat.size > 0, `${mr.name} diagram JSON should be non-empty`);
+
+				// Verify JSON is valid
+				const content = await fs.readFile(mr.diagramJsonPath, 'utf8');
+				const json = JSON.parse(content);
+				assert.ok(json, `${mr.name} diagram JSON should be parseable`);
+			}
 		}
 	});
 

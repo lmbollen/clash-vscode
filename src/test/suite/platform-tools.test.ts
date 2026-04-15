@@ -4,6 +4,7 @@ import { ToolchainChecker } from '../../toolchain';
 import { NextpnrRunner } from '../../nextpnr-runner';
 import { YosysRunner } from '../../yosys-runner';
 import { NextpnrFamily } from '../../nextpnr-types';
+import { ComponentInfo } from '../../clash-manifest-types';
 
 /**
  * Tests for platform tool support.
@@ -327,5 +328,58 @@ suite('Platform Tools Test Suite', () => {
 		assert.ok(summary.includes('yosys'), 'Summary should mention yosys');
 		assert.ok(summary.includes('nextpnr-ecp5'), 'Summary should mention nextpnr-ecp5');
 		assert.ok(summary.includes('ecppack'), 'Summary should mention ecppack');
+	});
+
+	// ---------------------------------------------------------------
+	// buildSynthesisWaves — parallel OOC wave planning
+	// ---------------------------------------------------------------
+
+	function mkComponent(name: string, deps: string[]): ComponentInfo {
+		return { name, verilogFiles: [], dependencies: deps, directory: '' };
+	}
+
+	test('buildSynthesisWaves: single component produces one wave', () => {
+		const waves = YosysRunner.buildSynthesisWaves([mkComponent('top', [])]);
+		assert.strictEqual(waves.length, 1);
+		assert.strictEqual(waves[0].length, 1);
+		assert.strictEqual(waves[0][0].name, 'top');
+	});
+
+	test('buildSynthesisWaves: independent leaves form one wave', () => {
+		const waves = YosysRunner.buildSynthesisWaves([
+			mkComponent('a', []),
+			mkComponent('b', []),
+			mkComponent('c', []),
+		]);
+		assert.strictEqual(waves.length, 1);
+		assert.strictEqual(waves[0].length, 3);
+	});
+
+	test('buildSynthesisWaves: linear chain produces one wave per level', () => {
+		// c depends on b depends on a
+		const waves = YosysRunner.buildSynthesisWaves([
+			mkComponent('a', []),
+			mkComponent('b', ['a']),
+			mkComponent('c', ['b']),
+		]);
+		assert.strictEqual(waves.length, 3);
+		assert.deepStrictEqual(waves[0].map(c => c.name), ['a']);
+		assert.deepStrictEqual(waves[1].map(c => c.name), ['b']);
+		assert.deepStrictEqual(waves[2].map(c => c.name), ['c']);
+	});
+
+	test('buildSynthesisWaves: diamond dependency graph', () => {
+		// top depends on B,C; B depends on D; C depends on D
+		const waves = YosysRunner.buildSynthesisWaves([
+			mkComponent('D', []),
+			mkComponent('B', ['D']),
+			mkComponent('C', ['D']),
+			mkComponent('top', ['B', 'C']),
+		]);
+		assert.strictEqual(waves.length, 3);
+		assert.deepStrictEqual(waves[0].map(c => c.name), ['D']);
+		const wave1Names = waves[1].map(c => c.name).sort();
+		assert.deepStrictEqual(wave1Names, ['B', 'C']);
+		assert.deepStrictEqual(waves[2].map(c => c.name), ['top']);
 	});
 });

@@ -1,0 +1,8 @@
+[book]
+title = "Clash VS Code Yosys Extension"
+authors = ["clash-lang"]
+language = "en"
+src = "src"
+
+[output.html]
+git-repository-url = "https://github.com/clash-lang/clash-vscode-yosys"

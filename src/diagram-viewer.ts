@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 import * as path from 'path';
 import { promises as fs } from 'fs';
 import { process_files } from 'yosys2digitaljs/node';
+import { yosys2digitaljs } from 'yosys2digitaljs/core';
 
 /**
  * Manages DigitalJS circuit viewer webview panels
@@ -90,11 +91,12 @@ export class DiagramViewer {
 			}
 			
 			digitaljsCircuit = result.output;
-			outputChannel.appendLine(`✓ Converted to DigitalJS (${Object.keys(digitaljsCircuit.devices || {}).length} devices)`);
-		} catch (err: any) {
-			vscode.window.showErrorMessage(`Failed to convert to DigitalJS: ${err?.message || err}`);
-			outputChannel.appendLine(`ERROR: Conversion failed: ${err?.message || err}`);
-			if (err?.stack) {
+			outputChannel.appendLine(`✓ Converted to DigitalJS (${Object.keys((digitaljsCircuit as { devices?: Record<string, unknown> }).devices || {}).length} devices)`);
+		} catch (err: unknown) {
+			const msg = err instanceof Error ? err.message : String(err);
+			vscode.window.showErrorMessage(`Failed to convert to DigitalJS: ${msg}`);
+			outputChannel.appendLine(`ERROR: Conversion failed: ${msg}`);
+			if (err instanceof Error && err.stack) {
 				outputChannel.appendLine(err.stack);
 			}
 			return;
@@ -139,10 +141,88 @@ export class DiagramViewer {
 	}
 
 	/**
+	 * Show a circuit diagram from a pre-generated Yosys JSON file.
+	 * Used by per-module synthesis mode to display individual module diagrams.
+	 */
+	public static async showDiagramFromJson(
+		jsonPath: string,
+		moduleName: string,
+		outputChannel: vscode.OutputChannel
+	): Promise<void> {
+		outputChannel.appendLine(`Loading diagram JSON from: ${jsonPath}`);
+
+		let rawJson: string;
+		try {
+			rawJson = await fs.readFile(jsonPath, 'utf8');
+		} catch (err) {
+			vscode.window.showErrorMessage(`Failed to read diagram JSON: ${err}`);
+			return;
+		}
+
+		let yosysOutput;
+		try {
+			yosysOutput = JSON.parse(rawJson);
+		} catch (err) {
+			vscode.window.showErrorMessage(`Invalid JSON in diagram file: ${err}`);
+			return;
+		}
+
+		// The file is Yosys RTLIL JSON (from write_json), not DigitalJS circuit
+		// JSON.  Convert it using the yosys2digitaljs core converter.
+		let circuit;
+		try {
+			circuit = yosys2digitaljs(yosysOutput);
+			outputChannel.appendLine(
+				`✓ Converted to DigitalJS (${Object.keys((circuit as { devices?: Record<string, unknown> }).devices || {}).length} devices)`
+			);
+		} catch (err: unknown) {
+			const msg = err instanceof Error ? err.message : String(err);
+			vscode.window.showErrorMessage(`Failed to convert Yosys JSON to DigitalJS: ${msg}`);
+			outputChannel.appendLine(`ERROR: Conversion failed: ${msg}`);
+			if (err instanceof Error && err.stack) { outputChannel.appendLine(err.stack); }
+			return;
+		}
+
+		const columnToShowIn = vscode.window.activeTextEditor
+			? vscode.window.activeTextEditor.viewColumn
+			: undefined;
+
+		if (DiagramViewer.currentPanel) {
+			DiagramViewer.currentPanel.reveal(columnToShowIn);
+			DiagramViewer.currentPanel.title = `Circuit: ${moduleName}`;
+		} else {
+			DiagramViewer.currentPanel = vscode.window.createWebviewPanel(
+				'clashCircuitDiagram',
+				`Circuit: ${moduleName}`,
+				columnToShowIn || vscode.ViewColumn.Two,
+				{
+					enableScripts: true,
+					retainContextWhenHidden: true,
+					localResourceRoots: []
+				}
+			);
+
+			DiagramViewer.currentPanel.onDidDispose(
+				() => {
+					DiagramViewer.currentPanel = undefined;
+				},
+				null
+			);
+		}
+
+		DiagramViewer.currentPanel.webview.html = DiagramViewer.getWebviewContent(
+			circuit,
+			moduleName
+		);
+
+		outputChannel.appendLine('✓ Circuit viewer opened');
+	}
+
+	/**
 	 * Generate HTML content for the webview with DigitalJS
 	 */
 	private static getWebviewContent(
-		circuit: any,
+		circuit: unknown,
 		topModule: string
 	): string {
 		// Serialize the circuit as JSON for embedding
@@ -153,15 +233,14 @@ export class DiagramViewer {
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline' https://cdn.jsdelivr.net; img-src 'self' data:; font-src https://cdn.jsdelivr.net;">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline' https://cdn.jsdelivr.net; img-src 'self' data: blob:; font-src data: https://cdn.jsdelivr.net;">
     <title>Circuit: ${topModule}</title>
-    
-    <!-- Load DigitalJS from CDN -->
-    <script src="https://cdn.jsdelivr.net/npm/jquery@3.6.0/dist/jquery.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/lodash@4.17.21/lodash.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/backbone@1.4.0/backbone-min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/jointjs@3.6.0/dist/joint.min.js"></script>
-    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/jointjs@3.6.0/dist/joint.min.css">
+
+    <!--
+      DigitalJS dist/main.js is a self-contained webpack bundle that includes
+      jQuery, jQuery-UI, @joint/core 4.x, elkjs, and backbone.
+      Do NOT load those libraries separately — duplicate globals cause conflicts.
+    -->
     <script src="https://cdn.jsdelivr.net/npm/digitaljs@0.14.2/dist/main.js"></script>
     
     <style>
@@ -227,13 +306,20 @@ export class DiagramViewer {
         }
         #paper-container {
             flex: 1;
-            overflow: auto;
+            overflow: hidden;
             background-color: #ffffff;
             position: relative;
         }
         #paper {
-            width: 100%;
-            height: 100%;
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+        }
+        /* Prevent JointJS SVG from clipping content during pan/zoom */
+        #paper svg {
+            overflow: visible !important;
         }
         .info-banner {
             background-color: var(--vscode-textBlockQuote-background);
@@ -274,9 +360,8 @@ export class DiagramViewer {
             </div>
         </div>
         <div class="info-banner">
-            <strong>DigitalJS Circuit Simulator</strong> - Click gates to inspect, drag to pan, scroll to zoom. 
-            Shortcuts: <code>Ctrl/Cmd +</code> zoom in, <code>Ctrl/Cmd -</code> zoom out, <code>Ctrl/Cmd 0</code> fit to view.
-            Start simulation to see signal flow in real-time.
+            <strong>DigitalJS Circuit Simulator</strong> - Scroll to zoom (toward cursor), Ctrl+drag or middle-drag to pan. 
+            Shortcuts: <code>Ctrl +</code> zoom in, <code>Ctrl -</code> zoom out, <code>Ctrl 0</code> fit to view.
         </div>
         <div id="paper-container">
             <div id="paper"></div>
@@ -286,181 +371,220 @@ export class DiagramViewer {
     <script>
         let circuit = null;
         let paper = null;
+        let _realFitToContent = null; // preserved before we override paper.fitToContent
+        let initialFitDone = false;   // true once the first auto-fit has run
+        let fitTimer = null;          // debounce timer for initial auto-fit
         let isRunning = false;
-        let zoomLevel = 0;  // Track current zoom level
+        let isPanning = false;
+        let panStartX = 0, panStartY = 0, panStartTx = 0, panStartTy = 0;
 
-        // Parse circuit data
+        const ZOOM_FACTOR = 1.1;
+        const MIN_SCALE = 0.05;
+        const MAX_SCALE = 10;
+
         const circuitData = ${circuitJson};
 
-        // Helper function to apply zoom (mirrors DigitalJS scaleAndRefreshPaper)
-        function applyZoom(scale) {
+        // ── Helpers ─────────────────────────────────────────────────────────
+
+        // Size the SVG to fill its container.
+        function sizePaper() {
             if (!paper) return;
-            paper.scale(Math.pow(1.1, scale));
-            const graph = paper.model;
-            paper.freeze();
-            graph.resetCells(graph.getCells());
-            paper.unfreeze();
+            const c = document.getElementById('paper-container');
+            paper.setDimensions(c.clientWidth, c.clientHeight);
         }
 
-        // Initialize DigitalJS
+        // ── Zoom ─────────────────────────────────────────────────────────────
+        //
+        // JointJS 4.x matrix layout: screen = scale * world + translate
+        //   paper.scale()     → { sx, sy }   (scale factors)
+        //   paper.translate() → { tx, ty }   (screen-space pixel offsets)
+        //
+        // Zoom toward screen point (cx, cy):
+        //   world point under cursor = (cursor - translate) / scale
+        //   new translate = cursor - newScale * worldPoint
+
+        function zoomAtPoint(newScale, cx, cy) {
+            if (!paper) return;
+            newScale = Math.max(MIN_SCALE, Math.min(MAX_SCALE, newScale));
+            const { sx: oldScale } = paper.scale();
+            const { tx: oldTx,  ty: oldTy  } = paper.translate();
+            // World coordinates under the cursor in the current transform
+            const worldX = (cx - oldTx) / oldScale;
+            const worldY = (cy - oldTy) / oldScale;
+            // New translate keeps that world point under the cursor
+            const newTx = cx - newScale * worldX;
+            const newTy = cy - newScale * worldY;
+            // paper.scale() and paper.translate() write directly to the SVG
+            // matrix — no cell re-render needed.  Do NOT call freeze/resetCells/
+            // unfreeze here: that triggers render:done which fires DigitalJS's
+            // permanent fitToContent listener and would override the zoom.
+            paper.scale(newScale);
+            paper.translate(newTx, newTy);
+        }
+
+        function zoomFit() {
+            if (!_realFitToContent) return;
+            try {
+                _realFitToContent({ padding: 30, allowNewOrigin: 'any' });
+            } catch (e) { console.error('zoomFit:', e); }
+        }
+
+        function zoomIn() {
+            if (!paper) return;
+            const { sx } = paper.scale();
+            const c = document.getElementById('paper-container');
+            zoomAtPoint(sx * ZOOM_FACTOR, c.clientWidth / 2, c.clientHeight / 2);
+        }
+
+        function zoomOut() {
+            if (!paper) return;
+            const { sx } = paper.scale();
+            const c = document.getElementById('paper-container');
+            zoomAtPoint(sx / ZOOM_FACTOR, c.clientWidth / 2, c.clientHeight / 2);
+        }
+
+        // ── Circuit init ─────────────────────────────────────────────────────
+
         try {
-            console.log('Initializing DigitalJS with circuit:', circuitData);
-            
-            // Create the circuit
             circuit = new digitaljs.Circuit(circuitData);
-            
-            // Display on paper
-            paper = circuit.displayOn($('#paper'));
-            
-            // Enable mouse wheel zooming - DigitalJS uses paper.scale() directly
+            // displayOn() accepts a plain DOM element (jQuery not required here)
+            paper = circuit.displayOn(document.getElementById('paper'));
+
             if (paper) {
-                // Enable mouse wheel zoom
-                $(paper.el).on('mousewheel DOMMouseScroll', function(evt) {
-                    evt.preventDefault();
-                    evt.stopPropagation();
-                    const e = evt.originalEvent;
-                    
-                    const delta = e.wheelDelta ? e.wheelDelta : -e.detail;
-                    
-                    if (delta > 0) {
-                        // Zoom in
-                        zoomLevel++;
-                        applyZoom(zoomLevel);
-                    } else {
-                        // Zoom out
-                        zoomLevel--;
-                        applyZoom(zoomLevel);
+                // ── Block DigitalJS's permanent fitToContent ──────────────────
+                //
+                // DigitalJS._makePaper() installs a permanent listener:
+                //   this.listenTo(paper, 'render:done', () => paper.fitToContent(...))
+                //
+                // This fires not just on initial load but also when ELK layout
+                // completes asynchronously (after the user has started interacting),
+                // resetting pan/zoom to the top-left.
+                //
+                // Fix: override paper.fitToContent with a no-op immediately, so the
+                // permanent listener becomes harmless.  We keep _realFitToContent
+                // for our explicit zoomFit() and for the one-time initial auto-fit.
+                _realFitToContent = paper.fitToContent.bind(paper);
+                paper.fitToContent = () => {};
+
+                sizePaper();
+
+                // Do ONE initial fit after the ELK layout has settled.
+                // Debounce: each render:done resets the timer; 300 ms of quiet means
+                // ELK is done and no more cells are moving.
+                paper.on('render:done', () => {
+                    if (initialFitDone) return;
+                    clearTimeout(fitTimer);
+                    fitTimer = setTimeout(() => {
+                        if (!initialFitDone && _realFitToContent) {
+                            _realFitToContent({ padding: 30, allowNewOrigin: 'any' });
+                            initialFitDone = true;
+                        }
+                    }, 300);
+                });
+
+                const el = paper.el;
+
+                // ── Mouse-wheel zoom toward cursor ──
+                el.addEventListener('wheel', (e) => {
+                    e.preventDefault();
+                    // User is interacting — cancel any pending auto-fit so it
+                    // doesn't override the new zoom position.
+                    initialFitDone = true;
+                    clearTimeout(fitTimer);
+                    const rect = el.getBoundingClientRect();
+                    const { sx: s } = paper.scale();
+                    zoomAtPoint(
+                        s * (e.deltaY < 0 ? ZOOM_FACTOR : 1 / ZOOM_FACTOR),
+                        e.clientX - rect.left,
+                        e.clientY - rect.top
+                    );
+                }, { passive: false });
+
+                // ── Middle-button / Ctrl+left-drag to pan ──
+                //
+                // JointJS translate is screen-space, so pan delta is just the raw
+                // pixel delta — do NOT divide by scale.
+                el.addEventListener('pointerdown', (e) => {
+                    if (e.button === 1 || (e.button === 0 && e.ctrlKey)) {
+                        // User is panning — cancel any pending auto-fit.
+                        initialFitDone = true;
+                        clearTimeout(fitTimer);
+                        isPanning = true;
+                        panStartX = e.clientX;
+                        panStartY = e.clientY;
+                        ({ tx: panStartTx, ty: panStartTy } = paper.translate());
+                        el.setPointerCapture(e.pointerId);
+                        e.preventDefault();
                     }
                 });
-                
-                console.log('Mouse wheel zoom enabled');
+                el.addEventListener('pointermove', (e) => {
+                    if (!isPanning) return;
+                    paper.translate(
+                        panStartTx + (e.clientX - panStartX),
+                        panStartTy + (e.clientY - panStartY)
+                    );
+                });
+                el.addEventListener('pointerup', (e) => {
+                    if (isPanning) { isPanning = false; el.releasePointerCapture(e.pointerId); }
+                });
             }
-            
-            // Adjust paper size
-            setTimeout(() => {
-                zoomFit();
-            }, 100);
-            
+
             document.getElementById('status').textContent = 'Circuit loaded';
-            console.log('Circuit initialized successfully');
         } catch (error) {
             console.error('Failed to initialize circuit:', error);
-            document.getElementById('paper-container').innerHTML = 
-                '<div class="error"><strong>Error:</strong> Failed to load circuit: ' + 
+            document.getElementById('paper-container').innerHTML =
+                '<div class="error"><strong>Error:</strong> Failed to load circuit: ' +
                 error.message + '</div>';
             document.getElementById('status').textContent = 'Error loading circuit';
         }
 
+        // ── Simulation controls ───────────────────────────────────────────────
+
         function startSimulation() {
             if (!circuit) return;
-            
             try {
                 circuit.start();
                 isRunning = true;
                 document.getElementById('start-btn').disabled = true;
                 document.getElementById('stop-btn').disabled = false;
                 document.getElementById('status').textContent = 'Simulation running';
-            } catch (error) {
-                console.error('Failed to start simulation:', error);
-                document.getElementById('status').textContent = 'Error: ' + error.message;
-            }
+            } catch (e) { document.getElementById('status').textContent = 'Error: ' + e.message; }
         }
 
         function stopSimulation() {
             if (!circuit) return;
-            
             try {
                 circuit.stop();
                 isRunning = false;
                 document.getElementById('start-btn').disabled = false;
                 document.getElementById('stop-btn').disabled = true;
                 document.getElementById('status').textContent = 'Simulation paused';
-            } catch (error) {
-                console.error('Failed to stop simulation:', error);
-            }
+            } catch (e) { console.error('stop failed:', e); }
         }
 
         function resetSimulation() {
             if (!circuit) return;
-            
             try {
                 const wasRunning = isRunning;
-                if (wasRunning) {
-                    circuit.stop();
-                }
-                
-                // Reset circuit state
+                if (wasRunning) circuit.stop();
                 circuit.reset();
-                
-                if (wasRunning) {
-                    circuit.start();
-                }
-                
+                if (wasRunning) circuit.start();
                 document.getElementById('status').textContent = 'Circuit reset';
-            } catch (error) {
-                console.error('Failed to reset circuit:', error);
-                document.getElementById('status').textContent = 'Error: ' + error.message;
-            }
+            } catch (e) { document.getElementById('status').textContent = 'Error: ' + e.message; }
         }
 
-        function zoomFit() {
-            if (!paper) return;
-            
-            try {
-                // Reset to default zoom
-                zoomLevel = 0;
-                applyZoom(zoomLevel);
-            } catch (error) {
-                console.error('Zoom fit failed:', error);
-            }
-        }
+        // ── Resize / keyboard ─────────────────────────────────────────────────
 
-        function zoomIn() {
-            if (!paper) return;
-            
-            try {
-                zoomLevel++;
-                applyZoom(zoomLevel);
-            } catch (error) {
-                console.error('Zoom in failed:', error);
-            }
-        }
-
-        function zoomOut() {
-            if (!paper) return;
-            
-            try {
-                zoomLevel--;
-                applyZoom(zoomLevel);
-            } catch (error) {
-                console.error('Zoom out failed:', error);
-            }
-        }
-
-        // Auto-resize on window resize
         window.addEventListener('resize', () => {
-            if (paper) {
-                setTimeout(zoomFit, 100);
-            }
+            if (!paper) return;
+            sizePaper();
         });
 
-        // Keyboard shortcuts for zoom
-        document.addEventListener('keydown', (evt) => {
-            // Ctrl/Cmd + Plus/Equals = Zoom In
-            if ((evt.ctrlKey || evt.metaKey) && (evt.key === '+' || evt.key === '=')) {
-                evt.preventDefault();
-                zoomIn();
-            }
-            // Ctrl/Cmd + Minus = Zoom Out
-            else if ((evt.ctrlKey || evt.metaKey) && evt.key === '-') {
-                evt.preventDefault();
-                zoomOut();
-            }
-            // Ctrl/Cmd + 0 = Zoom to Fit
-            else if ((evt.ctrlKey || evt.metaKey) && evt.key === '0') {
-                evt.preventDefault();
-                zoomFit();
-            }
+        document.addEventListener('keydown', (e) => {
+            if (!(e.ctrlKey || e.metaKey)) return;
+            if (e.key === '+' || e.key === '=') { e.preventDefault(); zoomIn(); }
+            else if (e.key === '-')              { e.preventDefault(); zoomOut(); }
+            else if (e.key === '0')              { e.preventDefault(); zoomFit(); }
         });
     </script>
 </body>
