@@ -51,7 +51,7 @@ export class SynthesisResultsTreeProvider
 // ── Module item ──────────────────────────────────────────────────────────────
 
 export class ModuleTreeItem extends vscode.TreeItem {
-    /** Non-$ cell types sorted by count descending. Empty for OOC modules. */
+    /** Cell types sorted by count descending. */
     readonly fpgaCells: [string, number][];
 
     constructor(labelOrPlaceholder: string);
@@ -66,7 +66,6 @@ export class ModuleTreeItem extends vscode.TreeItem {
         const r = arg;
         const fpgaCells = r.statistics?.cellTypes
             ? Array.from(r.statistics.cellTypes.entries())
-                .filter(([name]) => !name.startsWith('$'))
                 .sort((a, b) => b[1] - a[1])
             : [];
 
@@ -107,10 +106,12 @@ export class ModuleTreeItem extends vscode.TreeItem {
             );
         }
 
-        // contextValue drives the inline View button visibility in package.json.
-        this.contextValue = r.diagramJsonPath
-            ? 'synthesisModuleWithDiagram'
-            : 'synthesisModule';
+        // contextValue drives inline button visibility in package.json.
+        // Tags are appended so menu "when" clauses can use regex matching.
+        let ctx = 'synthesisModule';
+        if (r.diagramJsonPath) { ctx += '-diagram'; }
+        if (r.verilogFiles?.length) { ctx += '-verilog'; }
+        this.contextValue = ctx;
 
         // Store the full result so the viewModuleDiagram command can use it.
         this.result = r;

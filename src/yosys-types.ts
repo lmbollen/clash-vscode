@@ -68,6 +68,8 @@ export interface ModuleSynthesisResult {
 	rtlilPath?: string;
 	/** Path to JSON for DigitalJS visualization (per-module mode) */
 	diagramJsonPath?: string;
+	/** Clash-compiled Verilog source files for this module */
+	verilogFiles?: string[];
 	/** Synthesis time in milliseconds */
 	elapsedMs: number;
 	/** Statistics for this module */

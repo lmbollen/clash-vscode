@@ -117,9 +117,12 @@ export class FunctionDetector {
             s.range.end.isBeforeOrEqual(best.range.end) ? s : best
         );
 
-        // Single hover request only for this one symbol.
-        const hovers = await this.hlsClient.getHoverInfo(document, symbol.range.start);
-        const typeSignature = this.hlsClient.extractTypeSignature(hovers);
+        // Prefer the type from symbol.detail (unambiguous); only fire hover as a fallback.
+        let typeSignature = this.typeFromSymbolDetail(symbol);
+        if (!typeSignature) {
+            const hovers = await this.hlsClient.getHoverInfo(document, symbol.range.start);
+            typeSignature = this.hlsClient.extractTypeSignature(hovers);
+        }
         const isMonomorphic = typeSignature ? this.typeAnalyzer.isMonomorphic(typeSignature) : false;
         const moduleName = await this.hlsClient.getModuleName(document);
 
@@ -197,22 +200,30 @@ export class FunctionDetector {
     }
 
     /**
-     * Analyze a function symbol and extract its information
+     * Analyze a function symbol and extract its information.
+     *
+     * Prefers `DocumentSymbol.detail` (populated by HLS from GHC's type-checked
+     * AST for the current module) over `textDocument/hover`.  Hover is
+     * position-based and suffers from ambiguity when a local name shadows a
+     * qualified import with the same base name; `detail` only ever describes
+     * the definition in this module and is therefore unambiguous.
      */
     private async analyzeFunctionSymbol(
         symbol: vscode.DocumentSymbol,
         document: vscode.TextDocument,
         moduleName: string | null
     ): Promise<FunctionInfo | null> {
-        // Get hover information at the symbol's location to extract type
-        const position = symbol.range.start;
-        const hovers = await this.hlsClient.getHoverInfo(document, position);
-        const typeSignature = this.hlsClient.extractTypeSignature(hovers);
+        let typeSignature = this.typeFromSymbolDetail(symbol);
 
-        // Analyze if the function is monomorphic
-        const isMonomorphic = typeSignature ? 
-            this.typeAnalyzer.isMonomorphic(typeSignature) : 
-            false;
+        // Fall back to hover only when the symbol detail is missing or empty.
+        if (!typeSignature) {
+            const hovers = await this.hlsClient.getHoverInfo(document, symbol.range.start);
+            typeSignature = this.hlsClient.extractTypeSignature(hovers);
+        }
+
+        const isMonomorphic = typeSignature
+            ? this.typeAnalyzer.isMonomorphic(typeSignature)
+            : false;
 
         return {
             name: symbol.name,
@@ -222,6 +233,18 @@ export class FunctionDetector {
             filePath: document.fileName,
             moduleName
         };
+    }
+
+    /**
+     * Read the type signature from a DocumentSymbol's `detail` field.
+     * HLS emits this as either ":: Foo -> Bar" or "Foo -> Bar" depending on
+     * the ghcide version — normalise by stripping a leading "::".
+     */
+    private typeFromSymbolDetail(symbol: vscode.DocumentSymbol): string | null {
+        const detail = symbol.detail?.trim();
+        if (!detail) { return null; }
+        const stripped = detail.replace(/^::\s*/, '').trim();
+        return stripped.length > 0 ? stripped : null;
     }
 
     /**
