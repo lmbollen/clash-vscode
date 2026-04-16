@@ -115,7 +115,7 @@ export class YosysRunner {
 					this.outputChannel.appendLine('✓ Synthesis successful');
 
 					// Parse statistics
-					const stats = this.parseStatistics(stdout);
+					const stats = YosysRunner.parseStatisticsOutput(stdout);
 
 					// Save statistics report
 					try {
@@ -293,7 +293,7 @@ write_json ${jsonPath}
 	/**
 	 * Parse synthesis statistics from Yosys output
 	 */
-	private parseStatistics(output: string): SynthesisStatistics {
+	static parseStatisticsOutput(output: string): SynthesisStatistics {
 		const stats: SynthesisStatistics = {
 			rawStats: ''
 		};
@@ -598,8 +598,9 @@ write_json ${jsonPath}
 					netlistPath: jsonPath,
 					rtlilPath: ilPath,
 					diagramJsonPath: jsonPath,
+					verilogFiles: component.verilogFiles,
 					elapsedMs: elapsed,
-					statistics: this.parseStatistics(run.stdout),
+					statistics: YosysRunner.parseStatisticsOutput(run.stdout),
 					errors: []
 				});
 			} else {
@@ -707,8 +708,9 @@ write_json ${jsonPath}
 				success: true,
 				netlistPath,
 				diagramJsonPath,
+				verilogFiles: component.verilogFiles,
 				elapsedMs: elapsed,
-				statistics: this.parseStatistics(run.stdout),
+				statistics: YosysRunner.parseStatisticsOutput(run.stdout),
 				errors: []
 			};
 		} else {
@@ -803,7 +805,7 @@ write_json ${jsonPath}
 
 		if (run.code === 0) {
 			this.outputChannel.appendLine(`  ✓ Top module ${topComponent.name} (${elapsed}ms)`);
-			const stats = this.parseStatistics(run.stdout);
+			const stats = YosysRunner.parseStatisticsOutput(run.stdout);
 
 			try {
 				const statsReport = this.formatStatisticsReport(stats);
@@ -818,6 +820,7 @@ write_json ${jsonPath}
 					success: true,
 					netlistPath: jsonPath,
 					diagramJsonPath,
+					verilogFiles: topComponent.verilogFiles,
 					elapsedMs: elapsed,
 					statistics: stats,
 					errors: []

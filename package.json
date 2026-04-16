@@ -79,11 +79,6 @@
         "icon": "$(open-preview)"
       },
       {
-        "command": "clash-vscode-yosys.runTests",
-        "title": "Clash: Run Extension Tests",
-        "icon": "$(beaker)"
-      },
-      {
         "command": "clash-vscode-yosys.refreshHaskellFunctions",
         "title": "Clash: Refresh Haskell Functions",
         "icon": "$(refresh)"
@@ -96,6 +91,11 @@
       {
         "command": "clash-vscode-yosys.goToFunction",
         "title": "Clash: Go To Function"
+      },
+      {
+        "command": "clash-vscode-yosys.openSynthesizedVerilog",
+        "title": "Clash: Open Synthesized Verilog",
+        "icon": "$(file-code)"
       }
     ],
     "menus": {
@@ -124,18 +124,18 @@
           "command": "clash-vscode-yosys.openResultsPanel",
           "when": "view == clash-vscode-yosys.synthesisResults",
           "group": "navigation"
-        },
-        {
-          "command": "clash-vscode-yosys.runTests",
-          "when": "view == clash-vscode-yosys.synthesisResults",
-          "group": "navigation"
         }
       ],
       "view/item/context": [
         {
+          "command": "clash-vscode-yosys.openSynthesizedVerilog",
+          "when": "view == clash-vscode-yosys.synthesisResults && viewItem =~ /verilog/",
+          "group": "inline@1"
+        },
+        {
           "command": "clash-vscode-yosys.viewModuleDiagram",
-          "when": "view == clash-vscode-yosys.synthesisResults && viewItem == synthesisModuleWithDiagram",
-          "group": "inline"
+          "when": "view == clash-vscode-yosys.synthesisResults && viewItem =~ /diagram/",
+          "group": "inline@2"
         }
       ]
     },

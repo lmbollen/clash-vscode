@@ -32,9 +32,9 @@ topEntity ::
   Clock Dom50 ->
   Reset Dom50 ->
   Enable Dom50 ->
-  Signal Dom50 (Unsigned 8) ->
-  Signal Dom50 (Unsigned 8)
-topEntity = exposeClockResetEnable accum
+  Vec 8 (DSignal Dom50 0 (Unsigned 16)) ->
+  DSignal Dom50 3 (Unsigned 16)
+topEntity clk rst ena vec = 1 + (pipelinedSum clk ena (fmap (*2) vec))
 
 -- To specify the names of the ports of our top entity, we create a
 -- @Synthesize@ annotation.
@@ -65,5 +65,17 @@ plusPoly a b = a + b
 multUnsigned :: Unsigned 16 -> Unsigned 16 -> Unsigned 32
 multUnsigned a b = resize a * resize b
 
-pipelinedSum :: Clock System -> Enable System -> Vec 8 (DSignal System 0 (Unsigned 16)) -> DSignal System 3 (Unsigned 16)
+pipelinedSum :: Clock Dom50 -> Enable Dom50 -> Vec 8 (DSignal Dom50 0 (Unsigned 16)) -> DSignal Dom50 3 (Unsigned 16)
 pipelinedSum clk ena = D.delayedFold d1 0 (+) ena clk 
+
+{-# ANN pipelinedSum
+  (Synthesize
+    { t_name = "pipelinedSum"
+    , t_inputs = [ PortName "CLK"
+                 , PortName "EN"
+                 , PortName "Elements"
+                 ]
+    , t_output = PortName "DOUT"
+    }) #-}
+
+{-# OPAQUE pipelinedSum #-}

@@ -31,6 +31,20 @@ export class SynthesisResultsPanel {
 	}
 
 	/**
+	 * Persist synthesis results so they can be shown later via reopen().
+	 * Does NOT open or reveal the panel.
+	 */
+	static store(
+		moduleResults: ModuleSynthesisResult[],
+		title: string,
+		outputChannel: vscode.OutputChannel
+	): void {
+		SynthesisResultsPanel._lastResults = moduleResults;
+		SynthesisResultsPanel._lastTitle = title;
+		SynthesisResultsPanel._lastOutputChannel = outputChannel;
+	}
+
+	/**
 	 * Re-open (or focus) the panel using the last stored synthesis results.
 	 * Called from the sidebar "Open Panel" button.
 	 */

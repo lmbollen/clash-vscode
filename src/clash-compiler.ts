@@ -123,6 +123,43 @@ export class ClashCompiler {
 	}
 
 	/**
+	 * Run `cabal build clash-synth:clash` and return true when the output
+	 * contains "Up to date", meaning no source files (including transitive
+	 * dependencies) have changed since the last build.
+	 *
+	 * This is much more reliable than monitoring individual file saves, which
+	 * misses edits to dependency packages.
+	 */
+	async isUpToDate(options: {
+		workspaceRoot: string;
+		synthProjectRoot: string;
+		cabalProjectDir?: string;
+	}): Promise<boolean> {
+		const args = ['build', 'clash-synth:clash'];
+		let cwd: string;
+
+		if (options.cabalProjectDir) {
+			args.push(`--project-dir=${options.cabalProjectDir}`);
+			args.push(`--project-file=${path.join(options.synthProjectRoot, 'cabal.project')}`);
+			cwd = options.cabalProjectDir;
+		} else {
+			cwd = options.synthProjectRoot;
+		}
+
+		return new Promise((resolve) => {
+			const proc = spawn('cabal', args, { cwd, env: process.env });
+			let output = '';
+
+			proc.stdout?.on('data', (d) => { output += d.toString(); });
+			proc.stderr?.on('data', (d) => { output += d.toString(); });
+			proc.on('error', () => resolve(false));
+			proc.on('close', (code) => {
+				resolve(code === 0 && /Up to date/i.test(output));
+			});
+		});
+	}
+
+	/**
 	 * Compile a Clash module to Verilog.
 	 *
 	 * When options.synthProjectRoot is set, we run cabal inside the
