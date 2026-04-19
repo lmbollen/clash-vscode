@@ -1,6 +1,6 @@
 import * as assert from 'assert';
 import * as vscode from 'vscode';
-import { ModuleSynthesisResult } from '../../yosys-types';
+import { ModuleSynthesisResult, YosysOptions } from '../../yosys-types';
 
 /**
  * Tests for new synthesis features:
@@ -54,6 +54,14 @@ suite('Synthesis Features', () => {
 		);
 	});
 
+	test('openSettings command is registered', async () => {
+		const commands = await vscode.commands.getCommands(true);
+		assert.ok(
+			commands.includes('clash-vscode-yosys.openSettings'),
+			'openSettings command should be registered'
+		);
+	});
+
 	// ---------------------------------------------------------------
 	// Configuration: synthesisMode
 	// ---------------------------------------------------------------
@@ -103,5 +111,73 @@ suite('Synthesis Features', () => {
 		assert.strictEqual(result.rtlilPath, undefined);
 		assert.strictEqual(result.diagramJsonPath, undefined);
 		assert.strictEqual(result.netlistPath, undefined);
+	});
+
+	// ---------------------------------------------------------------
+	// Configuration: synthesisTarget
+	// ---------------------------------------------------------------
+
+	test('synthesisTarget config defaults to generic', () => {
+		const config = vscode.workspace.getConfiguration('clash-vscode-yosys');
+		const target = config.get<string>('synthesisTarget');
+		assert.strictEqual(target, 'generic');
+	});
+
+	test('synthesisTarget config schema default is generic', () => {
+		const config = vscode.workspace.getConfiguration('clash-vscode-yosys');
+		const info = config.inspect<string>('synthesisTarget');
+		assert.ok(info, 'synthesisTarget should be inspectable');
+		assert.strictEqual(info!.defaultValue, 'generic');
+	});
+
+	test('synthesisScript per-target settings default to empty string', () => {
+		const config = vscode.workspace.getConfiguration('clash-vscode-yosys');
+		const targets = ['generic', 'ice40', 'ecp5', 'xilinx', 'gowin', 'intel', 'quicklogic', 'sf2'];
+		for (const id of targets) {
+			const script = config.get<string>(`synthesisScript.${id}`);
+			assert.strictEqual(script, '', `synthesisScript.${id} should default to empty string`);
+		}
+	});
+
+	// ---------------------------------------------------------------
+	// YosysOptions: customScript field
+	// ---------------------------------------------------------------
+
+	test('YosysOptions supports customScript field', () => {
+		const opts: YosysOptions = {
+			workspaceRoot: '/ws',
+			outputDir: '/out',
+			topModule: 'top',
+			verilogPath: '/a.v',
+			targetFamily: 'ecp5',
+			customScript: 'read_verilog {files}\nsynth_ecp5 -top {topModule}',
+		};
+		assert.strictEqual(opts.customScript, 'read_verilog {files}\nsynth_ecp5 -top {topModule}');
+	});
+
+	test('YosysOptions customScript is optional', () => {
+		const opts: YosysOptions = {
+			workspaceRoot: '/ws',
+			outputDir: '/out',
+			topModule: 'top',
+			verilogPath: '/a.v',
+		};
+		assert.strictEqual(opts.customScript, undefined);
+	});
+
+	test('YosysOptions supports all new targetFamily values', () => {
+		const families: Array<YosysOptions['targetFamily']> = [
+			'ice40', 'ecp5', 'xilinx', 'gowin', 'intel', 'quicklogic', 'sf2', 'generic'
+		];
+		for (const family of families) {
+			const opts: YosysOptions = {
+				workspaceRoot: '/ws',
+				outputDir: '/out',
+				topModule: 'top',
+				verilogPath: '/a.v',
+				targetFamily: family,
+			};
+			assert.strictEqual(opts.targetFamily, family);
+		}
 	});
 });

@@ -22,7 +22,10 @@ export interface YosysOptions {
 	libertyFile?: string;
 	
 	/** Target FPGA family (optional) */
-	targetFamily?: 'ice40' | 'ecp5' | 'xilinx' | 'generic';
+	targetFamily?: 'ice40' | 'ecp5' | 'xilinx' | 'gowin' | 'intel' | 'quicklogic' | 'sf2' | 'generic';
+
+	/** User-customized synthesis script template. Overrides the default for targetFamily. */
+	customScript?: string;
 }
 
 /**

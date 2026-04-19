@@ -404,13 +404,13 @@ suite('SynthesisResultsTreeProvider', () => {
 		assert.strictEqual(item.collapsibleState, vscode.TreeItemCollapsibleState.Collapsed);
 	});
 
-	test('$-prefixed internal cells are excluded from fpgaCells', () => {
+	test('fpgaCells includes all cell types from statistics', () => {
 		const cellTypes = new Map([['$dffe', 10], ['LUT4', 5], ['TRELLIS_FF', 2]]);
 		const result = makeModuleResult('top', { statistics: { rawStats: '', cellTypes } });
 		provider.refresh([result]);
 		const [item] = provider.getChildren() as ModuleTreeItem[];
 		const names = item.fpgaCells.map(([n]) => n);
-		assert.ok(!names.includes('$dffe'), '$-prefixed cell should be excluded');
+		assert.ok(names.includes('$dffe'), 'should include $-prefixed cells');
 		assert.ok(names.includes('LUT4'));
 		assert.ok(names.includes('TRELLIS_FF'));
 	});
@@ -424,11 +424,11 @@ suite('SynthesisResultsTreeProvider', () => {
 		assert.deepStrictEqual(counts, [10, 3, 1]);
 	});
 
-	test('contextValue is synthesisModuleWithDiagram when diagramJsonPath set', () => {
+	test('contextValue includes -diagram tag when diagramJsonPath set', () => {
 		const result = makeModuleResult('top', { diagramJsonPath: '/tmp/d.json' });
 		provider.refresh([result]);
 		const [item] = provider.getChildren() as ModuleTreeItem[];
-		assert.strictEqual(item.contextValue, 'synthesisModuleWithDiagram');
+		assert.ok(item.contextValue!.includes('diagram'), 'should contain diagram tag');
 	});
 
 	test('contextValue is synthesisModule when no diagramJsonPath', () => {

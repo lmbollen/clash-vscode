@@ -335,6 +335,7 @@ export class SynthesisResultsPanel {
   }
   .controls { display: flex; gap: 6px; align-items: center; }
   .separator { color: var(--vscode-descriptionForeground); }
+
 </style>
 </head>
 <body>
@@ -400,7 +401,7 @@ function requestDiagram(idx) {
   vscode.postMessage({ type: 'showDiagram', moduleName: m.name, diagramJsonPath: m.diagramJsonPath });
 }
 
-// Receive circuit data from the extension host
+// Receive messages from the extension host
 window.addEventListener('message', event => {
   const msg = event.data;
   if (msg.type === 'circuitData') {

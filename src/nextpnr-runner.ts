@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import { spawn } from 'child_process';
 import * as path from 'path';
+import * as os from 'os';
 import { promises as fs } from 'fs';
 import {
 	NextpnrOptions,
@@ -8,7 +9,8 @@ import {
 	NextpnrWarning,
 	NextpnrError,
 	TimingInfo,
-	UtilizationInfo
+	UtilizationInfo,
+	PNR_FAMILIES
 } from './nextpnr-types';
 import { getLogger } from './file-logger';
 
@@ -84,13 +86,101 @@ export class NextpnrRunner {
 			case 'ice40':
 				return 'nextpnr-ice40';
 			case 'gowin':
-				return 'nextpnr-gowin';
+				return 'nextpnr-himbaechel';
 			case 'nexus':
 				return 'nextpnr-nexus';
 			case 'machxo2':
 				return 'nextpnr-machxo2';
 			default:
 				return 'nextpnr-generic';
+		}
+	}
+
+	/** Known package names per nextpnr family to probe. */
+	private static readonly CANDIDATE_PACKAGES: Record<string, string[]> = {
+		'nextpnr-ecp5': [
+			'CABGA256', 'CABGA381', 'CABGA554', 'CABGA756',
+			'CSFBGA285', 'CSFBGA381', 'CSFBGA554',
+		],
+		'nextpnr-ice40': [
+			'sg48', 'cm36', 'cm49', 'cm81', 'cm121', 'cm225',
+			'qn84', 'cb81', 'cb121', 'cb132', 'vq100', 'tq144',
+			'ct256', 'bg121',
+		],
+		'nextpnr-himbaechel': [],  // gowin packages depend heavily on part; skip probing
+	};
+
+	/** Cache: "binary:device" → valid packages (survives for the session). */
+	private static packageCache = new Map<string, string[]>();
+
+	/**
+	 * Discover which packages a nextpnr binary accepts for the given device
+	 * by probing each candidate package.
+	 *
+	 * @param device    Device value (e.g. '25k', 'hx8k', 'GW1N-9')
+	 * @param binary    nextpnr binary name (default: 'nextpnr-ecp5')
+	 * @param deviceFlag  How to pass the device: 'prefix' → `--<device>`, 'device' → `--device <device>`
+	 *
+	 * Results are cached per binary+device so the probe only runs once per session.
+	 */
+	static async getValidPackages(
+		device: string,
+		binary = 'nextpnr-ecp5',
+		deviceFlag: 'prefix' | 'device' = 'prefix'
+	): Promise<string[]> {
+		const cacheKey = `${binary}:${device}`;
+		const cached = NextpnrRunner.packageCache.get(cacheKey);
+		if (cached) { return cached; }
+
+		const candidates = NextpnrRunner.CANDIDATE_PACKAGES[binary] ?? [];
+		if (candidates.length === 0) {
+			NextpnrRunner.packageCache.set(cacheKey, []);
+			return [];
+		}
+
+		// Write a minimal valid JSON netlist so nextpnr can parse it.
+		// Using /dev/null causes a JSON parse error that masks real
+		// "Unsupported package" errors.
+		const probeJson = path.join(
+			os.tmpdir(),
+			`nextpnr-probe-${process.pid}.json`
+		);
+		await fs.writeFile(probeJson, '{"modules":{}}');
+
+		const deviceArgs = deviceFlag === 'prefix'
+			? [`--${device}`]
+			: ['--device', device];
+
+		try {
+			const probes = candidates.map(pkg =>
+				new Promise<{ pkg: string; ok: boolean }>(resolve => {
+					const proc = spawn(binary, [
+						...deviceArgs, '--package', pkg, '--json', probeJson,
+					], { timeout: 5000 });
+
+					let combined = '';
+					proc.stdout.on('data', (d) => { combined += d.toString(); });
+					proc.stderr.on('data', (d) => { combined += d.toString(); });
+					proc.on('error', () => resolve({ pkg, ok: false }));
+					proc.on('close', () => {
+						// The empty netlist always causes a non-zero exit
+						// ("no top module"), so we can't rely on the exit code.
+						// A package is valid if nextpnr didn't reject it.
+						const rejected = /unsupported package/i.test(combined);
+						resolve({ pkg, ok: !rejected });
+					});
+				})
+			);
+			const results = await Promise.all(probes);
+			const valid: string[] = [];
+			for (const { pkg, ok } of results) {
+				if (ok) { valid.push(pkg); }
+			}
+
+			NextpnrRunner.packageCache.set(cacheKey, valid);
+			return valid;
+		} finally {
+			try { await fs.unlink(probeJson); } catch { /* ignore */ }
 		}
 	}
 
@@ -103,23 +193,52 @@ export class NextpnrRunner {
 		// Input JSON
 		args.push('--json', options.jsonPath);
 
-		// Output textcfg
-		args.push('--textcfg', textcfgPath);
+		// Output flag varies by family
+		switch (options.family) {
+			case 'ice40':  args.push('--asc', textcfgPath); break;
+			case 'gowin':  args.push('--write', textcfgPath); break;
+			default:       args.push('--textcfg', textcfgPath); break;
+		}
 
-		// ECP5-specific options
+		// ECP5-specific options (legacy path)
 		if (options.family === 'ecp5' && options.ecp5) {
 			args.push('--' + options.ecp5.device);
 			args.push('--package', options.ecp5.package);
-			
+
 			if (options.ecp5.speedGrade) {
 				args.push('--speed', options.ecp5.speedGrade);
 			}
 		}
 
+		// Generic device / package (used for ice40, gowin, and new-style ecp5)
+		if (options.device && !options.ecp5) {
+			const familyInfo = PNR_FAMILIES.get(options.family);
+			if (familyInfo?.deviceFlag === 'prefix') {
+				// e.g. --hx8k, --25k
+				args.push('--' + options.device);
+			} else {
+				// e.g. --device GW1N-9
+				args.push('--device', options.device);
+			}
+		}
+		if (options.packageName && !options.ecp5) {
+			args.push('--package', options.packageName);
+		}
+
+		// Extra --vopt (e.g. family=GW1N-9C for Gowin himbaechel)
+		if (options.vopt) {
+			for (const v of options.vopt) {
+				args.push('--vopt', v);
+			}
+		}
+
 		// Constraints file
 		if (options.constraintsFile) {
-			const flag = options.family === 'ecp5' ? '--lpf' : '--pcf';
-			args.push(flag, options.constraintsFile);
+			switch (options.family) {
+				case 'ecp5': args.push('--lpf', options.constraintsFile); break;
+				case 'gowin': args.push('--cst', options.constraintsFile); break;
+				default: args.push('--pcf', options.constraintsFile); break;
+			}
 		}
 
 		// Frequency constraint
