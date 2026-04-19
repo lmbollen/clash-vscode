@@ -7,13 +7,14 @@ import { CodeGenerator, GenerationConfig } from './code-generator';
 import { ClashCompiler, ClashCompilationResult } from './clash-compiler';
 import { YosysRunner } from './yosys-runner';
 import { NextpnrRunner } from './nextpnr-runner';
-import { ECP5Device, ECP5Package } from './nextpnr-types';
+import { ECP5Device, ECP5Package, PNR_FAMILIES } from './nextpnr-types';
 import { FunctionInfo } from './types';
 import { ClashManifestParser } from './clash-manifest-parser';
 import { ToolchainChecker } from './toolchain';
 import { initializeLogger, getLogger } from './file-logger';
 import { ClashCodeActionProvider } from './clash-code-actions';
 import { SynthesisResultsPanel } from './synthesis-results-panel';
+import { SynthesisSettingsPanel } from './synthesis-settings-panel';
 import { SynthesisResultsTreeProvider } from './synthesis-results-tree';
 import { HaskellFunctionsTreeProvider, FunctionNode } from './haskell-functions-tree';
 
@@ -124,6 +125,13 @@ export function activate(context: vscode.ExtensionContext) {
 		hlsClient.isHaskellDocument(vscode.window.activeTextEditor.document)) {
 		refreshHaskellFunctionsTree(vscode.window.activeTextEditor.document);
 	}
+
+	// Command: open extension settings panel
+	context.subscriptions.push(
+		vscode.commands.registerCommand('clash-vscode-yosys.openSettings', () => {
+			SynthesisSettingsPanel.show();
+		})
+	);
 
 	// Command: (re-)open the synthesis results panel from the sidebar
 	context.subscriptions.push(
@@ -472,37 +480,39 @@ async function runYosynsSynthesis(
 	compiled: CompilationOutput,
 	wsRoot: string,
 	synthesisMode: string,
-	targetFamily: 'ecp5' | 'generic',
-	progress: ProgressReporter
+	targetFamily: string,
+	progress: ProgressReporter,
+	customScript?: string
 ): Promise<SynthesisOutput> {
 	const { compileResult, projectDirs, topModule, verilogInput } = compiled;
 
 	progress.report({ message: 'Synthesizing with Yosys…', increment: 40 });
 	outputChannel.appendLine('\n=== Step 3: Synthesizing with Yosys ===');
 	outputChannel.appendLine(`Mode: ${synthesisMode}`);
+	outputChannel.appendLine(`Target: ${targetFamily}`);
 
 	let synthResult: import('./yosys-types').YosysSynthesisResult;
 
-	if (compileResult.manifest) {
+	const yosysOpts = {
+		workspaceRoot: wsRoot, outputDir: projectDirs.yosys,
+		topModule, verilogPath: verilogInput, targetFamily,
+		customScript: customScript || undefined
+	} as import('./yosys-types').YosysOptions;
+
+	if (synthesisMode === 'whole-design') {
+		// Whole-design: single Yosys invocation with all files
+		synthResult = await yosysRunner.synthesize(yosysOpts);
+	} else if (compileResult.manifest) {
 		const manifestParser = new ClashManifestParser();
 		const components = await manifestParser.buildDependencyGraph(compileResult.manifest.manifestPath);
 
-		if (synthesisMode === 'per-module' && components.length > 1) {
-			synthResult = await yosysRunner.synthesizePerModule(components, {
-				workspaceRoot: wsRoot, outputDir: projectDirs.yosys,
-				topModule, verilogPath: verilogInput, targetFamily
-			});
+		if (components.length > 1) {
+			synthResult = await yosysRunner.synthesizePerModule(components, yosysOpts);
 		} else {
-			synthResult = await yosysRunner.synthesizeParallel(components, {
-				workspaceRoot: wsRoot, outputDir: projectDirs.yosys,
-				topModule, verilogPath: verilogInput, targetFamily
-			});
+			synthResult = await yosysRunner.synthesize(yosysOpts);
 		}
 	} else {
-		synthResult = await yosysRunner.synthesize({
-			workspaceRoot: wsRoot, outputDir: projectDirs.yosys,
-			topModule, verilogPath: verilogInput, targetFamily
-		});
+		synthResult = await yosysRunner.synthesize(yosysOpts);
 	}
 
 	if (!synthResult.success) {
@@ -628,10 +638,12 @@ async function getOrSynthesize(
 	func: FunctionInfo,
 	wsRoot: string,
 	synthesisMode: string,
-	targetFamily: 'ecp5' | 'generic',
-	progress: ProgressReporter
+	targetFamily: string,
+	progress: ProgressReporter,
+	customScript?: string
 ): Promise<{ compiled: CompilationOutput; synthesis: SynthesisOutput }> {
-	const cachedSynth = await pipelineCache.getSynthesis(func, synthesisMode) as SynthesisOutput | undefined;
+	const cacheMode = `${synthesisMode}:${targetFamily}`;
+	const cachedSynth = await pipelineCache.getSynthesis(func, cacheMode) as SynthesisOutput | undefined;
 	if (cachedSynth) {
 		outputChannel.appendLine('  ↩ Using cached synthesis (source unchanged)');
 		progress.report({ message: 'Using cached synthesis…', increment: 90 });
@@ -639,8 +651,8 @@ async function getOrSynthesize(
 		return { compiled: cachedCompile ?? cachedSynth as unknown as CompilationOutput, synthesis: cachedSynth };
 	}
 	const compiled = await getOrCompile(func, wsRoot, progress);
-	const synthesis = await runYosynsSynthesis(compiled, wsRoot, synthesisMode, targetFamily, progress);
-	pipelineCache.setSynthesis(func, synthesisMode, synthesis as unknown as CachedSynthesis);
+	const synthesis = await runYosynsSynthesis(compiled, wsRoot, synthesisMode, targetFamily, progress, customScript);
+	pipelineCache.setSynthesis(func, cacheMode, synthesis as unknown as CachedSynthesis);
 	return { compiled, synthesis };
 }
 
@@ -717,11 +729,14 @@ async function synthesizeOnlyCommand(providedFunc?: FunctionInfo) {
 			title: `Synthesizing ${func.name}`,
 			cancellable: false
 		}, async (progress) => {
+			const targetFamily = cfg.get<string>('synthesisTarget', 'generic');
+			const customScript = cfg.get<string>(`synthesisScript.${targetFamily}`, '') || undefined;
 			const { synthesis: { synthResult, moduleResults, sdcFrequencyMHz } } =
 				await getOrSynthesize(
 					func, wsRoot,
 					cfg.get<string>('synthesisMode', 'per-module'),
-					'ecp5', progress
+					targetFamily, progress,
+					customScript
 				);
 
 			progress.report({ message: 'Done', increment: 100 });
@@ -767,26 +782,39 @@ async function synthesizeAndPnRCommand(providedFunc?: FunctionInfo) {
 
 	const cfg = vscode.workspace.getConfiguration('clash-vscode-yosys');
 	if (!(await toolchain.require('yosys', cfg.get<string>('yosysCommand', 'yosys'), '-V', wsRoot))) { return; }
-	if (!(await toolchain.require('nextpnr-ecp5', 'nextpnr-ecp5', '--version', wsRoot))) { return; }
+
+	// Determine nextpnr family from the configured synthesis target
+	const synthTarget = cfg.get<string>('synthesisTarget', 'generic');
+	const familyInfo = PNR_FAMILIES.get(synthTarget);
+	if (!familyInfo) {
+		const supported = [...PNR_FAMILIES.keys()].join(', ');
+		vscode.window.showErrorMessage(
+			`Place & Route is not available for the "${synthTarget}" synthesis target. ` +
+			`Supported targets: ${supported}. Change the target in settings.`
+		);
+		return;
+	}
+
+	if (!(await toolchain.require(familyInfo.binary, familyInfo.binary, '--version', wsRoot))) { return; }
 
 	const func = await pickFunction(providedFunc);
 	if (!func) { return; }
 
-	const deviceOptions = [
-		{ label: 'LFE5U-25F (25k LUTs)', value: '25k', description: 'Small ECP5' },
-		{ label: 'LFE5U-45F (45k LUTs)', value: '45k', description: 'Medium ECP5' },
-		{ label: 'LFE5U-85F (85k LUTs)', value: '85k', description: 'Large ECP5' }
-	];
-	const deviceChoice = await vscode.window.showQuickPick(deviceOptions, { placeHolder: 'Select target ECP5 device' });
+	// Device picker — populated from PNR_FAMILIES registry
+	const deviceChoice = await vscode.window.showQuickPick(
+		familyInfo.devices,
+		{ placeHolder: `Select target ${synthTarget.toUpperCase()} device` }
+	);
 	if (!deviceChoice) { return; }
 
-	const packageOptions = [
-		{ label: 'CABGA381', value: 'CABGA381' },
-		{ label: 'CABGA554', value: 'CABGA554' },
-		{ label: 'CABGA756', value: 'CABGA756' }
-	];
-	const packageChoice = await vscode.window.showQuickPick(packageOptions, { placeHolder: 'Select package type' });
-	if (!packageChoice) { return; }
+	// Package picker — probe nextpnr for valid packages
+	const validPackages = await NextpnrRunner.getValidPackages(deviceChoice.value, familyInfo.binary, familyInfo.deviceFlag);
+	let packageChoice: { label: string; value: string } | undefined;
+	if (validPackages.length > 0) {
+		const packageOptions = validPackages.map(pkg => ({ label: pkg, value: pkg }));
+		packageChoice = await vscode.window.showQuickPick(packageOptions, { placeHolder: 'Select package type' });
+		if (!packageChoice) { return; }
+	}
 
 	outputChannel.show(true);
 	outputChannel.appendLine('='.repeat(60));
@@ -796,13 +824,14 @@ async function synthesizeAndPnRCommand(providedFunc?: FunctionInfo) {
 	try {
 		await vscode.window.withProgress({
 			location: vscode.ProgressLocation.Notification,
-			title: `Implementing ${func.name} on ECP5`,
+			title: `Implementing ${func.name} on ${synthTarget.toUpperCase()}`,
 			cancellable: false
 		}, async (progress) => {
-			// Steps 1–3: same Clash + Yosys pipeline as synthesizeOnlyCommand.
+			// Steps 1–3: Clash + Yosys pipeline.
 			// PnR always uses whole-design synthesis (nextpnr needs a merged netlist).
+			const customScript = cfg.get<string>(`synthesisScript.${synthTarget}`, '') || undefined;
 			const { synthesis: { synthResult, moduleResults, topModule, sdcFrequencyMHz, projectDirs } } =
-				await getOrSynthesize(func, wsRoot, 'whole-design', 'ecp5', progress);
+				await getOrSynthesize(func, wsRoot, 'whole-design', synthTarget, progress, customScript);
 
 			synthesisTreeProvider.refresh(moduleResults);
 			SynthesisResultsPanel.store(moduleResults, `Synthesis Results — ${func.name}`, outputChannel);
@@ -812,21 +841,34 @@ async function synthesizeAndPnRCommand(providedFunc?: FunctionInfo) {
 				throw new Error('No JSON output from Yosys — cannot run PnR');
 			}
 
-			progress.report({ message: 'Place and Route with nextpnr…', increment: 60 });
-			outputChannel.appendLine('\n=== Step 4: Place & Route with nextpnr ===');
+			progress.report({ message: `Place and Route with ${familyInfo.binary}…`, increment: 60 });
+			outputChannel.appendLine(`\n=== Step 4: Place & Route with ${familyInfo.binary} ===`);
 
-			const pnrResult = await nextpnrRunner.placeAndRoute({
-				family: 'ecp5',
+			// Build family-specific options
+			const selectedDevice = deviceChoice as import('./nextpnr-types').DeviceOption;
+			const pnrOpts: import('./nextpnr-types').NextpnrOptions = {
+				family: familyInfo.family,
 				jsonPath: synthResult.jsonPath,
 				outputDir: projectDirs.nextpnr,
 				topModule,
 				frequency: sdcFrequencyMHz,
-				ecp5: {
-					device: deviceChoice.value as ECP5Device,
-					package: packageChoice.value as ECP5Package,
-					speedGrade: '6'
-				}
-			});
+				device: selectedDevice.value,
+				packageName: packageChoice?.value,
+				vopt: selectedDevice.vopt ? [selectedDevice.vopt] : undefined,
+			};
+
+			// For ECP5, also fill the legacy ecp5 field so ecppack runs
+			if (familyInfo.family === 'ecp5') {
+				// 5G parts (um5g-*) only support speed grade 8
+				const is5G = selectedDevice.value.startsWith('um5g');
+				pnrOpts.ecp5 = {
+					device: selectedDevice.value as ECP5Device,
+					package: (packageChoice?.value ?? 'CABGA381') as ECP5Package,
+					speedGrade: is5G ? '8' : '6',
+				};
+			}
+
+			const pnrResult = await nextpnrRunner.placeAndRoute(pnrOpts);
 
 			if (!pnrResult.success) {
 				throw new Error('Place and route failed — check output channel for details');

@@ -6,7 +6,7 @@
 |--------|-----------|-------------------|
 | ECP5 | `nextpnr-ecp5` | `.lpf` |
 | iCE40 | `nextpnr-ice40` | `.pcf` |
-| Gowin | `nextpnr-gowin` | — |
+| Gowin | `nextpnr-himbaechel` | — |
 | Nexus | `nextpnr-nexus` | — |
 | MachXO2 | `nextpnr-machxo2` | — |
 | Generic | `nextpnr-generic` | — |

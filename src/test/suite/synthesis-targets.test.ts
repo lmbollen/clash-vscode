@@ -1,0 +1,249 @@
+import * as assert from 'assert';
+import {
+	SYNTHESIS_TARGETS,
+	TARGET_IDS,
+	getDefaultScript,
+	getTarget,
+	resolveScript,
+	computeScriptDiff,
+} from '../../synthesis-targets';
+
+// ── Target registry ─────────────────────────────────────────────────────────
+
+suite('Synthesis Targets — registry', () => {
+	test('SYNTHESIS_TARGETS contains all expected target ids', () => {
+		const expected = ['generic', 'ice40', 'ecp5', 'xilinx', 'gowin', 'intel', 'quicklogic', 'sf2'];
+		for (const id of expected) {
+			assert.ok(SYNTHESIS_TARGETS.has(id), `Missing target: ${id}`);
+		}
+	});
+
+	test('TARGET_IDS matches SYNTHESIS_TARGETS keys', () => {
+		assert.strictEqual(TARGET_IDS.length, SYNTHESIS_TARGETS.size);
+		for (const id of TARGET_IDS) {
+			assert.ok(SYNTHESIS_TARGETS.has(id), `TARGET_IDS contains ${id} not in map`);
+		}
+	});
+
+	test('every target has required fields', () => {
+		for (const [id, target] of SYNTHESIS_TARGETS) {
+			assert.ok(target.id, `${id} missing id`);
+			assert.ok(target.label, `${id} missing label`);
+			assert.ok(target.defaultScript.length > 0, `${id} has empty defaultScript`);
+			assert.strictEqual(target.id, id, `${id} id mismatch`);
+		}
+	});
+
+	test('generic target has null synthCommand', () => {
+		const generic = SYNTHESIS_TARGETS.get('generic')!;
+		assert.strictEqual(generic.synthCommand, null);
+	});
+
+	test('non-generic targets have a synthCommand', () => {
+		for (const [id, target] of SYNTHESIS_TARGETS) {
+			if (id === 'generic') { continue; }
+			assert.ok(target.synthCommand, `${id} should have a synthCommand`);
+			assert.ok(target.synthCommand!.startsWith('synth_'), `${id} synthCommand should start with synth_`);
+		}
+	});
+
+	test('default scripts contain expected placeholders', () => {
+		const placeholders = ['{files}', '{topModule}', '{outputDir}', '{outputBaseName}'];
+		for (const [id, target] of SYNTHESIS_TARGETS) {
+			for (const ph of placeholders) {
+				assert.ok(
+					target.defaultScript.includes(ph),
+					`${id} default script missing placeholder ${ph}`
+				);
+			}
+		}
+	});
+
+	test('non-generic default scripts contain their synth command', () => {
+		for (const [id, target] of SYNTHESIS_TARGETS) {
+			if (id === 'generic') { continue; }
+			assert.ok(
+				target.defaultScript.includes(target.synthCommand!),
+				`${id} default script should contain ${target.synthCommand}`
+			);
+		}
+	});
+});
+
+// ── getTarget / getDefaultScript ────────────────────────────────────────────
+
+suite('Synthesis Targets — getTarget / getDefaultScript', () => {
+	test('getTarget returns correct target for known id', () => {
+		const ecp5 = getTarget('ecp5');
+		assert.strictEqual(ecp5.id, 'ecp5');
+		assert.strictEqual(ecp5.synthCommand, 'synth_ecp5');
+	});
+
+	test('getTarget falls back to generic for unknown id', () => {
+		const unknown = getTarget('nonexistent_target');
+		assert.strictEqual(unknown.id, 'generic');
+	});
+
+	test('getDefaultScript returns non-empty script for known target', () => {
+		const script = getDefaultScript('ice40');
+		assert.ok(script.length > 0);
+		assert.ok(script.includes('synth_ice40'));
+	});
+
+	test('getDefaultScript returns generic script for unknown target', () => {
+		const script = getDefaultScript('nonexistent');
+		const genericScript = getDefaultScript('generic');
+		assert.strictEqual(script, genericScript);
+	});
+});
+
+// ── resolveScript ───────────────────────────────────────────────────────────
+
+suite('Synthesis Targets — resolveScript', () => {
+	const simpleTemplate = `# Script
+{files}
+hierarchy -check -top {topModule}
+synth_ecp5 -top {topModule}
+write_verilog {outputDir}/{outputBaseName}_synth.v
+write_json {outputDir}/{outputBaseName}.json
+`;
+
+	test('replaces {files} with read_verilog lines', () => {
+		const result = resolveScript(simpleTemplate, {
+			files: ['/path/to/a.v', '/path/to/b.v'],
+			topModule: 'top',
+			outputDir: '/out',
+			outputBaseName: 'top',
+		});
+		assert.ok(result.includes('read_verilog /path/to/a.v'));
+		assert.ok(result.includes('read_verilog /path/to/b.v'));
+	});
+
+	test('replaces {topModule} in all occurrences', () => {
+		const result = resolveScript(simpleTemplate, {
+			files: ['/a.v'],
+			topModule: 'myDesign',
+			outputDir: '/out',
+			outputBaseName: 'myDesign',
+		});
+		// synth_ecp5 -top myDesign and hierarchy -check -top myDesign
+		const matches = result.match(/myDesign/g);
+		assert.ok(matches && matches.length >= 3, `Expected at least 3 occurrences of myDesign, got ${matches?.length}`);
+	});
+
+	test('replaces {outputDir} and {outputBaseName}', () => {
+		const result = resolveScript(simpleTemplate, {
+			files: ['/a.v'],
+			topModule: 'top',
+			outputDir: '/build/synth',
+			outputBaseName: 'myMod',
+		});
+		assert.ok(result.includes('/build/synth/myMod_synth.v'));
+		assert.ok(result.includes('/build/synth/myMod.json'));
+	});
+
+	test('handles empty files array', () => {
+		const result = resolveScript('{files}\nhierarchy -top {topModule}', {
+			files: [],
+			topModule: 'top',
+			outputDir: '/out',
+			outputBaseName: 'top',
+		});
+		// {files} should resolve to empty string
+		assert.ok(result.startsWith('\nhierarchy'));
+	});
+
+	test('handles single file', () => {
+		const result = resolveScript('{files}', {
+			files: ['/only.v'],
+			topModule: 'top',
+			outputDir: '/out',
+			outputBaseName: 'top',
+		});
+		assert.strictEqual(result, 'read_verilog /only.v');
+	});
+
+	test('resolves a real default script without leftover placeholders', () => {
+		const template = getDefaultScript('ecp5');
+		const result = resolveScript(template, {
+			files: ['/design/top.v', '/design/sub.v'],
+			topModule: 'topEntity',
+			outputDir: '/build',
+			outputBaseName: 'topEntity',
+		});
+		assert.ok(!result.includes('{files}'), 'Should not contain {files}');
+		assert.ok(!result.includes('{topModule}'), 'Should not contain {topModule}');
+		assert.ok(!result.includes('{outputDir}'), 'Should not contain {outputDir}');
+		assert.ok(!result.includes('{outputBaseName}'), 'Should not contain {outputBaseName}');
+		assert.ok(result.includes('read_verilog /design/top.v'));
+		assert.ok(result.includes('synth_ecp5 -top topEntity'));
+	});
+});
+
+// ── computeScriptDiff ───────────────────────────────────────────────────────
+
+suite('Synthesis Targets — computeScriptDiff', () => {
+	test('identical scripts produce all equal lines', () => {
+		const script = 'line1\nline2\nline3';
+		const diff = computeScriptDiff(script, script);
+		assert.ok(diff.every(l => l.kind === 'equal'), 'All lines should be equal');
+		assert.strictEqual(diff.length, 3);
+	});
+
+	test('empty strings produce empty diff', () => {
+		const diff = computeScriptDiff('', '');
+		// Empty string splits to [''], so one equal line
+		assert.strictEqual(diff.length, 1);
+		assert.strictEqual(diff[0].kind, 'equal');
+	});
+
+	test('added lines are marked as added', () => {
+		const diff = computeScriptDiff('line1\nline2', 'line1\nnew_line\nline2');
+		const added = diff.filter(l => l.kind === 'added');
+		assert.ok(added.length >= 1, 'Should have at least one added line');
+		assert.ok(added.some(l => l.text === 'new_line'), 'new_line should be added');
+	});
+
+	test('removed lines are marked as removed', () => {
+		const diff = computeScriptDiff('line1\nold_line\nline2', 'line1\nline2');
+		const removed = diff.filter(l => l.kind === 'removed');
+		assert.ok(removed.length >= 1, 'Should have at least one removed line');
+		assert.ok(removed.some(l => l.text === 'old_line'), 'old_line should be removed');
+	});
+
+	test('replaced line shows as remove + add', () => {
+		const diff = computeScriptDiff('aaa\nbbb\nccc', 'aaa\nBBB\nccc');
+		const removed = diff.filter(l => l.kind === 'removed');
+		const added = diff.filter(l => l.kind === 'added');
+		assert.ok(removed.some(l => l.text === 'bbb'), 'bbb should be removed');
+		assert.ok(added.some(l => l.text === 'BBB'), 'BBB should be added');
+	});
+
+	test('completely different scripts show all removes then adds', () => {
+		const diff = computeScriptDiff('a\nb', 'x\ny');
+		const removed = diff.filter(l => l.kind === 'removed');
+		const added = diff.filter(l => l.kind === 'added');
+		assert.strictEqual(removed.length, 2);
+		assert.strictEqual(added.length, 2);
+	});
+
+	test('diff preserves line order', () => {
+		const diff = computeScriptDiff('a\nb\nc', 'a\nX\nc');
+		const texts = diff.map(l => l.text);
+		// 'a' should come before 'X' and 'c'
+		assert.ok(texts.indexOf('a') < texts.indexOf('X') || texts.indexOf('a') < texts.indexOf('c'));
+	});
+
+	test('diff of real script modification', () => {
+		const defaultScript = 'read_verilog {files}\nhierarchy -check -top {topModule}\nsynth_ecp5 -top {topModule}\nstat -width';
+		const customScript = 'read_verilog {files}\nhierarchy -check -top {topModule}\nsynth_ecp5 -top {topModule} -noccu2\nstat -width\nstat -json';
+		const diff = computeScriptDiff(defaultScript, customScript);
+
+		// Original synth line removed, modified one added
+		const removed = diff.filter(l => l.kind === 'removed');
+		const added = diff.filter(l => l.kind === 'added');
+		assert.ok(removed.some(l => l.text === 'synth_ecp5 -top {topModule}'));
+		assert.ok(added.some(l => l.text === 'synth_ecp5 -top {topModule} -noccu2'));
+		assert.ok(added.some(l => l.text === 'stat -json'));
+	});
+});

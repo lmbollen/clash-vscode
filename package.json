@@ -96,6 +96,11 @@
         "command": "clash-vscode-yosys.openSynthesizedVerilog",
         "title": "Clash: Open Synthesized Verilog",
         "icon": "$(file-code)"
+      },
+      {
+        "command": "clash-vscode-yosys.openSettings",
+        "title": "Clash: Open Settings",
+        "icon": "$(gear)"
       }
     ],
     "menus": {
@@ -121,9 +126,19 @@
           "group": "navigation@4"
         },
         {
+          "command": "clash-vscode-yosys.openSettings",
+          "when": "view == clash-vscode-yosys.haskellFunctions",
+          "group": "navigation@5"
+        },
+        {
           "command": "clash-vscode-yosys.openResultsPanel",
           "when": "view == clash-vscode-yosys.synthesisResults",
-          "group": "navigation"
+          "group": "navigation@1"
+        },
+        {
+          "command": "clash-vscode-yosys.openSettings",
+          "when": "view == clash-vscode-yosys.synthesisResults",
+          "group": "navigation@2"
         }
       ],
       "view/item/context": [
@@ -175,6 +190,79 @@
           ],
           "default": "per-module",
           "description": "Synthesis mode: whole-design synthesizes everything at once; per-module synthesizes each component separately with individual diagrams"
+        },
+        "clash-vscode-yosys.synthesisTarget": {
+          "type": "string",
+          "enum": [
+            "generic",
+            "ice40",
+            "ecp5",
+            "xilinx",
+            "gowin",
+            "intel",
+            "quicklogic",
+            "sf2"
+          ],
+          "enumDescriptions": [
+            "Generic (technology-independent synthesis)",
+            "Lattice iCE40 (synth_ice40)",
+            "Lattice ECP5 (synth_ecp5)",
+            "AMD / Xilinx 7-series (synth_xilinx)",
+            "Gowin (synth_gowin)",
+            "Intel / Altera (synth_intel)",
+            "QuickLogic (synth_quicklogic)",
+            "Microsemi SmartFusion2 (synth_sf2)"
+          ],
+          "default": "generic",
+          "description": "Target FPGA family for Yosys synthesis"
+        },
+        "clash-vscode-yosys.synthesisScript.generic": {
+          "type": "string",
+          "default": "",
+          "editPresentation": "multilineText",
+          "description": "Custom Yosys script for Generic target. Leave empty to use the built-in default. Placeholders: {files}, {topModule}, {outputDir}, {outputBaseName}"
+        },
+        "clash-vscode-yosys.synthesisScript.ice40": {
+          "type": "string",
+          "default": "",
+          "editPresentation": "multilineText",
+          "description": "Custom Yosys script for iCE40 target. Leave empty to use the built-in default. Placeholders: {files}, {topModule}, {outputDir}, {outputBaseName}"
+        },
+        "clash-vscode-yosys.synthesisScript.ecp5": {
+          "type": "string",
+          "default": "",
+          "editPresentation": "multilineText",
+          "description": "Custom Yosys script for ECP5 target. Leave empty to use the built-in default. Placeholders: {files}, {topModule}, {outputDir}, {outputBaseName}"
+        },
+        "clash-vscode-yosys.synthesisScript.xilinx": {
+          "type": "string",
+          "default": "",
+          "editPresentation": "multilineText",
+          "description": "Custom Yosys script for Xilinx target. Leave empty to use the built-in default. Placeholders: {files}, {topModule}, {outputDir}, {outputBaseName}"
+        },
+        "clash-vscode-yosys.synthesisScript.gowin": {
+          "type": "string",
+          "default": "",
+          "editPresentation": "multilineText",
+          "description": "Custom Yosys script for Gowin target. Leave empty to use the built-in default. Placeholders: {files}, {topModule}, {outputDir}, {outputBaseName}"
+        },
+        "clash-vscode-yosys.synthesisScript.intel": {
+          "type": "string",
+          "default": "",
+          "editPresentation": "multilineText",
+          "description": "Custom Yosys script for Intel target. Leave empty to use the built-in default. Placeholders: {files}, {topModule}, {outputDir}, {outputBaseName}"
+        },
+        "clash-vscode-yosys.synthesisScript.quicklogic": {
+          "type": "string",
+          "default": "",
+          "editPresentation": "multilineText",
+          "description": "Custom Yosys script for QuickLogic target. Leave empty to use the built-in default. Placeholders: {files}, {topModule}, {outputDir}, {outputBaseName}"
+        },
+        "clash-vscode-yosys.synthesisScript.sf2": {
+          "type": "string",
+          "default": "",
+          "editPresentation": "multilineText",
+          "description": "Custom Yosys script for SmartFusion2 target. Leave empty to use the built-in default. Placeholders: {files}, {topModule}, {outputDir}, {outputBaseName}"
         }
       }
     }
