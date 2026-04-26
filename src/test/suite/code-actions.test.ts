@@ -86,12 +86,16 @@ suite('Code Action Provider', () => {
 		const actions = await provider.provideCodeActions(doc, range);
 
 		// If HLS found monomorphic functions, verify command structure
+		const validCommands = new Set([
+			'clash-toolkit.elaborate',
+			'clash-toolkit.synthesize',
+			'clash-toolkit.placeAndRoute',
+		]);
 		for (const action of actions) {
 			assert.ok(action.command, 'Action should have a command');
 			assert.ok(
-				action.command!.command === 'clash-vscode-yosys.synthesizeOnly' ||
-				action.command!.command === 'clash-vscode-yosys.synthesizeAndPnR',
-				`Command should be synthesizeOnly or synthesizeAndPnR, got: ${action.command!.command}`
+				validCommands.has(action.command!.command),
+				`Command should be one of elaborate/synthesize/placeAndRoute, got: ${action.command!.command}`
 			);
 			assert.ok(
 				action.command!.arguments && action.command!.arguments.length === 1,

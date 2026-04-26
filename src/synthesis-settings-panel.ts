@@ -3,6 +3,7 @@ import {
 	SYNTHESIS_TARGETS,
 	TARGET_IDS,
 	getDefaultScript,
+	getDefaultElaborationScript,
 	computeScriptDiff,
 	DiffLine,
 } from './synthesis-targets';
@@ -54,7 +55,7 @@ export class SynthesisSettingsPanel {
 		// Listen to webview messages
 		SynthesisSettingsPanel.messageListener = panel.webview.onDidReceiveMessage(
 			async (message) => {
-				const cfg = vscode.workspace.getConfiguration('clash-vscode-yosys');
+				const cfg = vscode.workspace.getConfiguration('clash-toolkit');
 				switch (message.type) {
 					case 'changeTarget': {
 						await cfg.update('synthesisTarget', message.targetId, vscode.ConfigurationTarget.Workspace);
@@ -78,6 +79,20 @@ export class SynthesisSettingsPanel {
 						await cfg.update(`synthesisScript.${targetId}`, undefined, vscode.ConfigurationTarget.Workspace);
 						break;
 					}
+					case 'saveElaborationScript': {
+						const script = message.script as string;
+						const defaultScript = getDefaultElaborationScript();
+						if (script.trim() === defaultScript.trim()) {
+							await cfg.update('elaborationScript', undefined, vscode.ConfigurationTarget.Workspace);
+						} else {
+							await cfg.update('elaborationScript', script, vscode.ConfigurationTarget.Workspace);
+						}
+						break;
+					}
+					case 'resetElaborationScript': {
+						await cfg.update('elaborationScript', undefined, vscode.ConfigurationTarget.Workspace);
+						break;
+					}
 					case 'changeSynthesisMode': {
 						await cfg.update('synthesisMode', message.mode, vscode.ConfigurationTarget.Workspace);
 						break;
@@ -92,7 +107,7 @@ export class SynthesisSettingsPanel {
 
 		// Re-send state when configuration changes (e.g. after save/reset)
 		SynthesisSettingsPanel.configListener = vscode.workspace.onDidChangeConfiguration(e => {
-			if (e.affectsConfiguration('clash-vscode-yosys') && SynthesisSettingsPanel.currentPanel) {
+			if (e.affectsConfiguration('clash-toolkit') && SynthesisSettingsPanel.currentPanel) {
 				SynthesisSettingsPanel.sendState(SynthesisSettingsPanel.currentPanel);
 			}
 		});
@@ -105,7 +120,7 @@ export class SynthesisSettingsPanel {
 	// -----------------------------------------------------------------------
 
 	private static sendState(panel: vscode.WebviewPanel): void {
-		const cfg = vscode.workspace.getConfiguration('clash-vscode-yosys');
+		const cfg = vscode.workspace.getConfiguration('clash-toolkit');
 		const targetId = cfg.get<string>('synthesisTarget', 'generic');
 		const synthesisMode = cfg.get<string>('synthesisMode', 'per-module');
 		const defaultScript = getDefaultScript(targetId);
@@ -117,6 +132,13 @@ export class SynthesisSettingsPanel {
 			id,
 			label: SYNTHESIS_TARGETS.get(id)!.label,
 		}));
+
+		const elaborationDefault = getDefaultElaborationScript();
+		const elaborationCustom = cfg.get<string>('elaborationScript', '') || '';
+		const elaborationDiff: DiffLine[] = elaborationCustom
+			? computeScriptDiff(elaborationDefault, elaborationCustom)
+			: [];
+
 		panel.webview.postMessage({
 			type: 'state',
 			targetId,
@@ -125,6 +147,9 @@ export class SynthesisSettingsPanel {
 			defaultScript,
 			customScript,
 			diff,
+			elaborationDefault,
+			elaborationCustom,
+			elaborationDiff,
 		});
 	}
 
@@ -333,6 +358,42 @@ export class SynthesisSettingsPanel {
 <h1>Clash Synthesis Settings</h1>
 
 <!-- ═══════════════════════════════════════════════════════════════════════ -->
+<h2>Elaboration</h2>
+
+<div class="field">
+  <label>
+    Elaboration Script
+    <span class="badge hidden" id="elab-modified-badge">modified</span>
+  </label>
+  <div class="description">
+    Yosys script used for the Elaborate command — hierarchy + proc only, no
+    technology mapping.  Produces a word-level netlist with generic cells
+    (<code>$add</code>, <code>$mux</code>, <code>$dff</code>, ...).
+  </div>
+  <textarea id="elab-script-editor" spellcheck="false"></textarea>
+  <div class="placeholder-help">
+    Placeholders:
+    <code>{files}</code> input Verilog files &middot;
+    <code>{topModule}</code> top module name &middot;
+    <code>{outputDir}</code> output directory &middot;
+    <code>{outputBaseName}</code> base filename
+  </div>
+  <div class="btn-row">
+    <button class="btn" id="elab-save-btn" onclick="saveElaborationScript()">Save</button>
+    <button class="btn btn-secondary" id="elab-reset-btn" onclick="resetElaborationScript()">Reset to Default</button>
+    <span class="saved-msg" id="elab-saved-msg">Saved</span>
+  </div>
+</div>
+
+<div class="diff-section" id="elab-diff-section" style="display:none">
+  <div class="diff-header" onclick="toggleElabDiff()">
+    <span class="chevron" id="elab-diff-chevron">&#9654;</span>
+    <span>Changes from default</span>
+  </div>
+  <div class="diff-body" id="elab-diff-body"></div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════════════════ -->
 <h2>Synthesis</h2>
 
 <div class="field">
@@ -390,6 +451,8 @@ const vscode = acquireVsCodeApi();
 let currentTargetId = '';
 let currentDefault = '';
 let savedTimer = null;
+let elabCurrentDefault = '';
+let elabSavedTimer = null;
 
 // ── Target change ───────────────────────────────────────────────────────
 
@@ -450,6 +513,104 @@ function saveScript() {
 
 function resetScript() {
   vscode.postMessage({ type: 'resetScript', targetId: currentTargetId });
+}
+
+// ── Elaboration script editing ──────────────────────────────────────────
+
+const elabEditor = document.getElementById('elab-script-editor');
+
+elabEditor.addEventListener('input', function() {
+  updateElabModifiedState();
+});
+
+elabEditor.addEventListener('keydown', function(e) {
+  if (e.key === 'Tab') {
+    e.preventDefault();
+    const start = this.selectionStart;
+    const end = this.selectionEnd;
+    this.value = this.value.substring(0, start) + '  ' + this.value.substring(end);
+    this.selectionStart = this.selectionEnd = start + 2;
+    updateElabModifiedState();
+  }
+});
+
+function updateElabModifiedState() {
+  const isModified = elabEditor.value.trim() !== elabCurrentDefault.trim();
+  document.getElementById('elab-modified-badge').classList.toggle('hidden', !isModified);
+  if (isModified) {
+    renderElabDiffFromTexts(elabCurrentDefault, elabEditor.value);
+    document.getElementById('elab-diff-section').style.display = '';
+  } else {
+    document.getElementById('elab-diff-section').style.display = 'none';
+  }
+}
+
+function saveElaborationScript() {
+  vscode.postMessage({
+    type: 'saveElaborationScript',
+    script: elabEditor.value,
+  });
+  const msg = document.getElementById('elab-saved-msg');
+  msg.classList.add('show');
+  clearTimeout(elabSavedTimer);
+  elabSavedTimer = setTimeout(() => msg.classList.remove('show'), 2000);
+}
+
+function resetElaborationScript() {
+  vscode.postMessage({ type: 'resetElaborationScript' });
+}
+
+function toggleElabDiff() {
+  const body = document.getElementById('elab-diff-body');
+  const chevron = document.getElementById('elab-diff-chevron');
+  const visible = body.classList.toggle('visible');
+  chevron.classList.toggle('open', visible);
+}
+
+function renderElabDiff(diff) {
+  const body = document.getElementById('elab-diff-body');
+  body.innerHTML = '';
+  for (const line of diff) {
+    const div = document.createElement('div');
+    if (line.kind === 'added') {
+      div.className = 'diff-added';
+      div.textContent = '+ ' + line.text;
+    } else if (line.kind === 'removed') {
+      div.className = 'diff-removed';
+      div.textContent = '- ' + line.text;
+    } else {
+      div.textContent = '  ' + line.text;
+    }
+    body.appendChild(div);
+  }
+}
+
+function renderElabDiffFromTexts(defaultText, userText) {
+  const a = defaultText.split('\\n');
+  const b = userText.split('\\n');
+  const maxLen = Math.max(a.length, b.length);
+  const body = document.getElementById('elab-diff-body');
+  body.innerHTML = '';
+  for (let i = 0; i < maxLen; i++) {
+    const div = document.createElement('div');
+    if (i >= a.length) {
+      div.className = 'diff-added';
+      div.textContent = '+ ' + b[i];
+    } else if (i >= b.length) {
+      div.className = 'diff-removed';
+      div.textContent = '- ' + a[i];
+    } else if (a[i] !== b[i]) {
+      const rem = document.createElement('div');
+      rem.className = 'diff-removed';
+      rem.textContent = '- ' + a[i];
+      body.appendChild(rem);
+      div.className = 'diff-added';
+      div.textContent = '+ ' + b[i];
+    } else {
+      div.textContent = '  ' + a[i];
+    }
+    body.appendChild(div);
+  }
 }
 
 // ── Diff rendering ──────────────────────────────────────────────────────
@@ -551,6 +712,18 @@ function renderState(msg) {
     renderDiff(msg.diff);
   } else {
     document.getElementById('diff-section').style.display = 'none';
+  }
+
+  // Elaboration editor
+  elabCurrentDefault = msg.elaborationDefault || '';
+  const hasElabCustom = msg.elaborationCustom && msg.elaborationCustom.length > 0;
+  elabEditor.value = hasElabCustom ? msg.elaborationCustom : elabCurrentDefault;
+  document.getElementById('elab-modified-badge').classList.toggle('hidden', !hasElabCustom);
+  if (hasElabCustom && msg.elaborationDiff && msg.elaborationDiff.length > 0) {
+    document.getElementById('elab-diff-section').style.display = '';
+    renderElabDiff(msg.elaborationDiff);
+  } else {
+    document.getElementById('elab-diff-section').style.display = 'none';
   }
 }
 

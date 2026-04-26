@@ -10,9 +10,34 @@ import {
 	NextpnrError,
 	TimingInfo,
 	UtilizationInfo,
+	CriticalPath,
 	PNR_FAMILIES
 } from './nextpnr-types';
 import { getLogger } from './file-logger';
+
+/**
+ * Shape of the JSON produced by nextpnr's `--report` flag.
+ *
+ * Empirically (nextpnr 2024 builds):
+ *   fmax: { "<clock-net>": { achieved: MHz, constraint: MHz } }
+ *   utilization: { "<cell-type>": { used, available } }
+ *   critical_paths: [{ from, to, path: [{ delay, type, ... }] }]
+ */
+export interface NextpnrReport {
+	fmax?: Record<string, { achieved?: number; constraint?: number }>;
+	utilization?: Record<string, { used?: number; available?: number }>;
+	critical_paths?: Array<{
+		from?: string;
+		to?: string;
+		path?: Array<{
+			delay?: number;
+			type?: string;
+			net?: string;
+			from?: { cell?: string; port?: string };
+			to?: { cell?: string; port?: string };
+		}>;
+	}>;
+}
 
 /**
  * Handles nextpnr place-and-route execution
@@ -39,16 +64,26 @@ export class NextpnrRunner {
 		// Determine output paths
 		const textcfgPath = path.join(options.outputDir, `${options.topModule}.config`);
 		const bitstreamPath = path.join(options.outputDir, `${options.topModule}.bit`);
+		const reportJsonPath = path.join(options.outputDir, 'report.json');
+		const routedSvgPath = options.routedSvg
+			? path.join(options.outputDir, `${options.topModule}.routed.svg`)
+			: undefined;
 
 		// Build nextpnr command
-		const args = NextpnrRunner.buildNextpnrArgs(options, textcfgPath);
+		const args = NextpnrRunner.buildNextpnrArgs(options, textcfgPath, {
+			reportJsonPath,
+			routedSvgPath,
+		});
 		const executable = NextpnrRunner.getExecutable(options.family);
 
 		this.outputChannel.appendLine(`\nRunning: ${executable} ${args.join(' ')}`);
 		this.outputChannel.appendLine('');
 
 		// Run nextpnr
-		const nextpnrResult = await this.runNextpnr(executable, args, options);
+		const nextpnrResult = await this.runNextpnr(executable, args, options, {
+			reportJsonPath,
+			routedSvgPath,
+		});
 
 		if (!nextpnrResult.success) {
 			return nextpnrResult;
@@ -185,9 +220,18 @@ export class NextpnrRunner {
 	}
 
 	/**
-	 * Build nextpnr command-line arguments
+	 * Build nextpnr command-line arguments.
+	 *
+	 * Emits `--report <json>` and `--detailed-timing-report` by default so we
+	 * get structured timing/utilization data instead of having to scrape the
+	 * text log.  `--timing-allow-fail` is also on by default so a slow design
+	 * still produces a usable Fmax report instead of hard-failing PNR.
 	 */
-	static buildNextpnrArgs(options: NextpnrOptions, textcfgPath: string): string[] {
+	static buildNextpnrArgs(
+		options: NextpnrOptions,
+		textcfgPath: string,
+		extras: { reportJsonPath?: string; routedSvgPath?: string } = {}
+	): string[] {
 		const args: string[] = [];
 
 		// Input JSON
@@ -251,9 +295,19 @@ export class NextpnrRunner {
 			args.push('--seed', options.seed.toString());
 		}
 
-		// Timing report
-		if (options.timing) {
-			args.push('--timing-allow-fail');
+		// Structured output — always enabled.  The JSON report is our primary
+		// source for timing/utilization; detailed-timing-report adds per-net
+		// data; timing-allow-fail lets analysis runs complete even when the
+		// design doesn't meet the user's SDC/--freq constraint.
+		if (extras.reportJsonPath) {
+			args.push('--report', extras.reportJsonPath);
+			args.push('--detailed-timing-report');
+		}
+		args.push('--timing-allow-fail');
+
+		// Optional routed-layout SVG
+		if (extras.routedSvgPath) {
+			args.push('--routed-svg', extras.routedSvgPath);
 		}
 
 		// Additional arguments
@@ -270,8 +324,10 @@ export class NextpnrRunner {
 	private async runNextpnr(
 		executable: string,
 		args: string[],
-		options: NextpnrOptions
+		options: NextpnrOptions,
+		paths: { reportJsonPath: string; routedSvgPath?: string }
 	): Promise<NextpnrResult> {
+		const { reportJsonPath, routedSvgPath } = paths;
 		return new Promise((resolve) => {
 			let stdout = '';
 			let stderr = '';
@@ -331,9 +387,19 @@ export class NextpnrRunner {
 				if (code === 0) {
 					this.outputChannel.appendLine('✓ Place and route successful');
 
-					// Parse output for timing and utilization
-					const timing = this.parseTiming(stdout);
-					const utilization = this.parseUtilization(stdout);
+					// Prefer the structured JSON report; fall back to text scraping
+					// only when the report is missing (older nextpnr or malformed).
+					const report = await NextpnrRunner.loadReportJson(reportJsonPath);
+					const timing = report
+						? NextpnrRunner.timingFromReport(report, this.parseTiming(stdout))
+						: this.parseTiming(stdout);
+					const utilization = report
+						? NextpnrRunner.utilizationFromReport(report, options.family)
+							?? this.parseUtilization(stdout)
+						: this.parseUtilization(stdout);
+					const criticalPaths = report
+						? NextpnrRunner.criticalPathsFromReport(report)
+						: [];
 
 					// Display timing analysis in output channel
 					if (timing) {
@@ -413,12 +479,21 @@ export class NextpnrRunner {
 
 					const textcfgPath = path.join(options.outputDir, `${options.topModule}.config`);
 
+					// Expose the report path only if nextpnr actually wrote it.
+					const reportExists = await fs.access(reportJsonPath).then(() => true, () => false);
+					const svgExists = routedSvgPath
+						? await fs.access(routedSvgPath).then(() => true, () => false)
+						: false;
+
 					resolve({
 						success: true,
 						textcfgPath,
 						output: fullOutput,
 						timing,
 						utilization,
+						criticalPaths: criticalPaths.length > 0 ? criticalPaths : undefined,
+						reportJsonPath: reportExists ? reportJsonPath : undefined,
+						routedSvgPath: svgExists ? routedSvgPath : undefined,
 						warnings,
 						errors
 					});
@@ -478,6 +553,171 @@ export class NextpnrRunner {
 				resolve({ success: code === 0 });
 			});
 		});
+	}
+
+	/** Read and parse the JSON report written by nextpnr's `--report` flag. */
+	static async loadReportJson(reportJsonPath: string): Promise<NextpnrReport | undefined> {
+		try {
+			const raw = await fs.readFile(reportJsonPath, 'utf8');
+			return JSON.parse(raw) as NextpnrReport;
+		} catch {
+			return undefined;
+		}
+	}
+
+	/**
+	 * Derive our TimingInfo shape from the JSON report.
+	 *
+	 * `fmax` contains one entry per clock domain; we take the worst (slowest)
+	 * achieved frequency as the design Fmax.  Pre-placement frequency and
+	 * individual setup/hold slack aren't in the JSON, so we keep any values
+	 * the text parser pulled out (e.g. slack from nextpnr's own log lines).
+	 */
+	static timingFromReport(
+		report: NextpnrReport,
+		textFallback?: TimingInfo
+	): TimingInfo {
+		const timing: TimingInfo = textFallback
+			? { ...textFallback, constraintsMet: textFallback.constraintsMet }
+			: { constraintsMet: true };
+
+		// Fmax across clock domains.
+		const fmaxEntries = Object.values(report.fmax ?? {});
+		if (fmaxEntries.length > 0) {
+			const achieved = fmaxEntries
+				.map(e => e.achieved)
+				.filter((x): x is number => typeof x === 'number');
+			if (achieved.length > 0) {
+				timing.maxFrequency = Math.min(...achieved);
+			}
+			// Constraint met iff every constrained clock achieved its target.
+			const missed = fmaxEntries.some(
+				e => typeof e.achieved === 'number'
+					&& typeof e.constraint === 'number'
+					&& e.achieved < e.constraint
+			);
+			if (missed) { timing.constraintsMet = false; }
+		}
+
+		// Critical-path delay: take the longest sum-of-delays across all paths.
+		const paths = report.critical_paths ?? [];
+		if (paths.length > 0) {
+			let worst = 0;
+			for (const p of paths) {
+				const total = (p.path ?? []).reduce(
+					(acc, step) => acc + (step.delay ?? 0),
+					0
+				);
+				if (total > worst) { worst = total; }
+			}
+			if (worst > 0) { timing.criticalPathDelay = worst; }
+		}
+
+		return timing;
+	}
+
+	/**
+	 * Extract critical paths from the JSON report, sorted slowest-first.
+	 * Empty array when no paths are reported (e.g. purely combinational
+	 * design or no clock constraints).
+	 */
+	static criticalPathsFromReport(report: NextpnrReport): CriticalPath[] {
+		const paths: CriticalPath[] = [];
+		for (const p of report.critical_paths ?? []) {
+			const steps = (p.path ?? []).map(step => ({
+				delay: step.delay ?? 0,
+				type: step.type ?? 'unknown',
+				fromCell: step.from?.cell,
+				toCell: step.to?.cell,
+				net: step.net,
+			}));
+			const totalDelay = steps.reduce((a, s) => a + s.delay, 0);
+			paths.push({
+				from: p.from ?? '<unknown>',
+				to: p.to ?? '<unknown>',
+				totalDelay,
+				steps,
+			});
+		}
+		paths.sort((a, b) => b.totalDelay - a.totalDelay);
+		return paths;
+	}
+
+	/**
+	 * Derive our UtilizationInfo shape from the JSON report's `utilization` map.
+	 *
+	 * nextpnr reports one entry per primitive cell type (family-specific names
+	 * like TRELLIS_FF, SB_LUT4, DP16KD, ...).  We aggregate them into the
+	 * canonical LUT/FF/BRAM/DSP/IO buckets the rest of the extension expects.
+	 */
+	static utilizationFromReport(
+		report: NextpnrReport,
+		family: string
+	): UtilizationInfo | undefined {
+		const util = report.utilization;
+		if (!util) { return undefined; }
+
+		// Per-family cell-type → bucket map, covering the primitive names the
+		// corresponding `synth_*` pass emits.
+		const buckets: Record<string, { lut: RegExp; ff: RegExp; bram: RegExp; dsp: RegExp; io: RegExp }> = {
+			ecp5: {
+				lut: /^TRELLIS_COMB$|^TRELLIS_SLICE$|^LUT4$/,
+				ff: /^TRELLIS_FF$/,
+				bram: /^DP16KD$|^PDPW16KD$/,
+				dsp: /^MULT18X18D$|^ALU54B$/,
+				io: /^TRELLIS_IO$|^SIOLOGIC$|^IOLOGIC$/,
+			},
+			ice40: {
+				lut: /^SB_LUT4$/,
+				ff: /^SB_DFF/,
+				bram: /^SB_RAM40_4K$/,
+				dsp: /^SB_MAC16$/,
+				io: /^SB_IO$/,
+			},
+			gowin: {
+				lut: /^LUT[1-6]$/,
+				ff: /^DFF[A-Z]*$/,
+				bram: /^BSRAM$|^RAM16S|^B?SRAM/,
+				dsp: /^MULT|^ALU/,
+				io: /^IOB|^IDDR|^ODDR/,
+			},
+		};
+
+		// Generic heuristic for unknown families: substring match.
+		const rules = buckets[family] ?? {
+			lut: /LUT|COMB/i,
+			ff: /FF|DFF/i,
+			bram: /BRAM|RAM|EBR/i,
+			dsp: /DSP|MULT|MAC/i,
+			io: /\bIO\b|IOB|PAD/i,
+		};
+
+		const sum = (rx: RegExp): { used: number; total: number } | undefined => {
+			let used = 0;
+			let total = 0;
+			let matched = false;
+			for (const [name, entry] of Object.entries(util)) {
+				if (!rx.test(name)) { continue; }
+				matched = true;
+				used += entry.used ?? 0;
+				total += entry.available ?? 0;
+			}
+			return matched ? { used, total } : undefined;
+		};
+
+		const info: UtilizationInfo = {
+			luts: sum(rules.lut),
+			registers: sum(rules.ff),
+			bram: sum(rules.bram),
+			dsp: sum(rules.dsp),
+			io: sum(rules.io),
+		};
+
+		// Drop any undefined buckets so the result serialises cleanly.
+		for (const k of Object.keys(info) as (keyof UtilizationInfo)[]) {
+			if (info[k] === undefined) { delete info[k]; }
+		}
+		return Object.keys(info).length > 0 ? info : undefined;
 	}
 
 	/**

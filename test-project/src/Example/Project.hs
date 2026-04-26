@@ -66,7 +66,7 @@ multUnsigned :: Unsigned 16 -> Unsigned 16 -> Unsigned 32
 multUnsigned a b = resize a * resize b
 
 pipelinedSum :: Clock Dom50 -> Enable Dom50 -> Vec 8 (DSignal Dom50 0 (Unsigned 16)) -> DSignal Dom50 3 (Unsigned 16)
-pipelinedSum clk ena = D.delayedFold d1 0 (+) ena clk 
+pipelinedSum clk ena = D.delayedFold d1 0 (+) ena clk
 
 {-# ANN pipelinedSum
   (Synthesize
@@ -79,3 +79,21 @@ pipelinedSum clk ena = D.delayedFold d1 0 (+) ena clk
     }) #-}
 
 {-# OPAQUE pipelinedSum #-}
+
+-- | A deliberately deep combinational chain: a left-fold sum over a
+-- 16-element vector.  Unlike a tree reduction, this expresses an explicit
+-- linear data-dependency (each addition consumes the previous result),
+-- so Yosys's `ltp` reports a non-trivial combinational depth — useful
+-- for exercising logic-depth reporting in the Elaboration / Synthesis
+-- stages.
+deepChain :: Vec 16 (Unsigned 8) -> Unsigned 8
+deepChain = foldl (+) 0
+
+{-# ANN deepChain
+  (Synthesize
+    { t_name = "deepChain"
+    , t_inputs = [ PortName "XS" ]
+    , t_output = PortName "Y"
+    }) #-}
+
+{-# OPAQUE deepChain #-}

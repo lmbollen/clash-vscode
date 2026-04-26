@@ -118,7 +118,7 @@ export class ToolchainChecker {
      * Returns a map of tool name → status.
      */
     async checkAll(cwd?: string): Promise<Map<string, ToolStatus>> {
-        const config = vscode.workspace.getConfiguration('clash-vscode-yosys');
+        const config = vscode.workspace.getConfiguration('clash-toolkit');
         const yosysCmd = config.get<string>('yosysCommand', 'yosys');
 
         const checks = [
@@ -152,7 +152,7 @@ export class ToolchainChecker {
         const status = await this.check(name, command, versionFlag, cwd);
         if (!status.available) {
             const settingHint = name === 'yosys'
-                    ? 'clash-vscode-yosys.yosysCommand'
+                    ? 'clash-toolkit.yosysCommand'
                     : undefined;
 
             let msg = `${name} is not available: ${status.error}.`;
@@ -167,7 +167,7 @@ export class ToolchainChecker {
                 if (choice === 'Open Settings') {
                     vscode.commands.executeCommand(
                         'workbench.action.openSettings',
-                        settingHint || 'clash-vscode-yosys'
+                        settingHint || 'clash-toolkit'
                     );
                 }
             });

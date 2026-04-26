@@ -3,7 +3,7 @@ import * as vscode from 'vscode';
 import { ToolchainChecker } from '../../toolchain';
 import { NextpnrRunner } from '../../nextpnr-runner';
 import { YosysRunner } from '../../yosys-runner';
-import { NextpnrFamily, PNR_FAMILIES } from '../../nextpnr-types';
+import { NextpnrFamily, PNR_FAMILIES, ECP5Device, ECP5Package } from '../../nextpnr-types';
 import { ComponentInfo } from '../../clash-manifest-types';
 
 /**
@@ -138,7 +138,13 @@ suite('Platform Tools Test Suite', () => {
 			{ family: 'generic', jsonPath: '/tmp/d.json', outputDir: '/tmp/out', topModule: 'top' },
 			'/tmp/out/top.config'
 		);
-		assert.deepStrictEqual(args, ['--json', '/tmp/d.json', '--textcfg', '/tmp/out/top.config']);
+		// `--timing-allow-fail` is unconditionally appended now; see the
+		// dedicated test "Nextpnr: buildArgs always includes --timing-allow-fail".
+		assert.deepStrictEqual(args, [
+			'--json', '/tmp/d.json',
+			'--textcfg', '/tmp/out/top.config',
+			'--timing-allow-fail',
+		]);
 	});
 
 	test('Nextpnr: buildArgs uses --asc for ice40', () => {
@@ -177,12 +183,161 @@ suite('Platform Tools Test Suite', () => {
 		assert.ok(args.includes('42'));
 	});
 
-	test('Nextpnr: buildArgs includes --timing-allow-fail', () => {
+	test('Nextpnr: buildArgs always includes --timing-allow-fail', () => {
+		// Analysis flow: never hard-fail on timing, always produce a report.
 		const args = NextpnrRunner.buildNextpnrArgs(
-			{ family: 'ecp5', jsonPath: '/j.json', outputDir: '/o', topModule: 't', device: '25k', timing: true },
+			{ family: 'ecp5', jsonPath: '/j.json', outputDir: '/o', topModule: 't', device: '25k' },
 			'/o/t.config'
 		);
 		assert.ok(args.includes('--timing-allow-fail'));
+	});
+
+	test('Nextpnr: buildArgs includes --report and --detailed-timing-report when path given', () => {
+		const args = NextpnrRunner.buildNextpnrArgs(
+			{ family: 'ecp5', jsonPath: '/j.json', outputDir: '/o', topModule: 't', device: '25k' },
+			'/o/t.config',
+			{ reportJsonPath: '/o/report.json' }
+		);
+		assert.ok(args.includes('--report'));
+		assert.ok(args.includes('/o/report.json'));
+		assert.ok(args.includes('--detailed-timing-report'));
+	});
+
+	test('Nextpnr: buildArgs includes --routed-svg when path given', () => {
+		const args = NextpnrRunner.buildNextpnrArgs(
+			{ family: 'ecp5', jsonPath: '/j.json', outputDir: '/o', topModule: 't', device: '25k' },
+			'/o/t.config',
+			{ reportJsonPath: '/o/report.json', routedSvgPath: '/o/t.routed.svg' }
+		);
+		assert.ok(args.includes('--routed-svg'));
+		assert.ok(args.includes('/o/t.routed.svg'));
+	});
+
+	// ---------------------------------------------------------------
+	// Nextpnr: JSON report parsing
+	// ---------------------------------------------------------------
+
+	test('Nextpnr: timingFromReport derives Fmax from worst-case clock', () => {
+		const report: import('../../nextpnr-runner').NextpnrReport = {
+			fmax: {
+				clkA: { achieved: 250.5, constraint: 100 },
+				clkB: { achieved: 120.0, constraint: 100 },
+			},
+			critical_paths: [
+				{ from: 'clkA', to: 'clkA', path: [{ delay: 1.0 }, { delay: 2.5 }] },
+				{ from: 'clkB', to: 'clkB', path: [{ delay: 3.0 }, { delay: 4.0 }, { delay: 1.2 }] },
+			],
+		};
+		const timing = NextpnrRunner.timingFromReport(report);
+		assert.strictEqual(timing.maxFrequency, 120.0, 'worst-case Fmax wins');
+		assert.ok(timing.criticalPathDelay !== undefined);
+		assert.ok(Math.abs(timing.criticalPathDelay! - 8.2) < 1e-6, 'longest path total delay');
+		assert.strictEqual(timing.constraintsMet, true, 'both clocks meet their constraints');
+	});
+
+	test('Nextpnr: timingFromReport marks constraint failed when any clock misses', () => {
+		const report: import('../../nextpnr-runner').NextpnrReport = {
+			fmax: {
+				slowclk: { achieved: 50, constraint: 100 },
+			},
+		};
+		const timing = NextpnrRunner.timingFromReport(report);
+		assert.strictEqual(timing.constraintsMet, false);
+	});
+
+	test('Nextpnr: utilizationFromReport buckets ECP5 primitives correctly', () => {
+		const report: import('../../nextpnr-runner').NextpnrReport = {
+			utilization: {
+				TRELLIS_COMB: { used: 142, available: 24288 },
+				TRELLIS_FF:   { used: 80,  available: 24288 },
+				TRELLIS_IO:   { used: 12,  available: 197 },
+				DP16KD:       { used: 2,   available: 56 },
+				MULT18X18D:   { used: 1,   available: 28 },
+				ALU54B:       { used: 3,   available: 14 },
+				PCSCLKDIV:    { used: 0,   available: 2 },
+			},
+		};
+		const util = NextpnrRunner.utilizationFromReport(report, 'ecp5');
+		assert.ok(util, 'should produce utilization');
+		assert.deepStrictEqual(util!.luts, { used: 142, total: 24288 });
+		assert.deepStrictEqual(util!.registers, { used: 80, total: 24288 });
+		assert.deepStrictEqual(util!.io, { used: 12, total: 197 });
+		assert.deepStrictEqual(util!.bram, { used: 2, total: 56 });
+		assert.deepStrictEqual(util!.dsp, { used: 4, total: 42 }, 'DSP = MULT18X18D + ALU54B');
+	});
+
+	test('Nextpnr: utilizationFromReport buckets iCE40 primitives correctly', () => {
+		const report: import('../../nextpnr-runner').NextpnrReport = {
+			utilization: {
+				SB_LUT4:      { used: 300, available: 7680 },
+				SB_DFF:       { used: 100, available: 7680 },
+				SB_DFFE:      { used: 50,  available: 7680 },
+				SB_IO:        { used: 10,  available: 256 },
+				SB_RAM40_4K:  { used: 4,   available: 32 },
+				SB_MAC16:     { used: 1,   available: 8 },
+			},
+		};
+		const util = NextpnrRunner.utilizationFromReport(report, 'ice40');
+		assert.deepStrictEqual(util!.luts, { used: 300, total: 7680 });
+		assert.deepStrictEqual(util!.registers, { used: 150, total: 15360 }, 'DFF + DFFE');
+		assert.deepStrictEqual(util!.io, { used: 10, total: 256 });
+		assert.deepStrictEqual(util!.bram, { used: 4, total: 32 });
+		assert.deepStrictEqual(util!.dsp, { used: 1, total: 8 });
+	});
+
+	test('Nextpnr: utilizationFromReport falls back to heuristic for unknown families', () => {
+		const report: import('../../nextpnr-runner').NextpnrReport = {
+			utilization: {
+				SOME_LUT4:  { used: 5, available: 100 },
+				SOME_DFF:   { used: 3, available: 100 },
+			},
+		};
+		const util = NextpnrRunner.utilizationFromReport(report, 'unknown-family');
+		assert.ok(util);
+		assert.deepStrictEqual(util!.luts, { used: 5, total: 100 });
+		assert.deepStrictEqual(util!.registers, { used: 3, total: 100 });
+	});
+
+	test('Nextpnr: criticalPathsFromReport extracts steps and sorts slowest-first', () => {
+		const report: import('../../nextpnr-runner').NextpnrReport = {
+			critical_paths: [
+				{
+					from: 'clkA',
+					to: 'clkA',
+					path: [
+						{ delay: 0.5, type: 'clk-to-q', from: { cell: 'ff1', port: 'Q' } },
+						{ delay: 1.2, type: 'routing',  net: 'wireA', to: { cell: 'ff2', port: 'D' } },
+					],
+				},
+				{
+					from: 'clkB',
+					to: 'clkB',
+					path: [
+						{ delay: 2.0, type: 'clk-to-q' },
+						{ delay: 3.5, type: 'routing' },
+						{ delay: 1.0, type: 'setup' },
+					],
+				},
+			],
+		};
+		const paths = NextpnrRunner.criticalPathsFromReport(report);
+		assert.strictEqual(paths.length, 2);
+		assert.strictEqual(paths[0].from, 'clkB', 'slower path comes first');
+		assert.ok(Math.abs(paths[0].totalDelay - 6.5) < 1e-6);
+		assert.ok(Math.abs(paths[1].totalDelay - 1.7) < 1e-6);
+		// Step fields are normalised — from/to cells + nets are preserved.
+		const routing = paths[1].steps.find(s => s.type === 'routing');
+		assert.ok(routing);
+		assert.strictEqual(routing!.net, 'wireA');
+		assert.strictEqual(routing!.toCell, 'ff2');
+	});
+
+	test('Nextpnr: criticalPathsFromReport returns empty when report has no paths', () => {
+		assert.deepStrictEqual(NextpnrRunner.criticalPathsFromReport({}), []);
+		assert.deepStrictEqual(
+			NextpnrRunner.criticalPathsFromReport({ critical_paths: [] }),
+			[]
+		);
 	});
 
 	test('Nextpnr: buildArgs includes extra args', () => {
@@ -324,7 +479,7 @@ suite('Platform Tools Test Suite', () => {
 							jsonPath: '/tmp/d.json',
 							outputDir: '/tmp/out',
 							topModule: 'top',
-							ecp5: { device: dev.value as any, package: pkg as any, speedGrade: '6' },
+							ecp5: { device: dev.value as ECP5Device, package: pkg as ECP5Package, speedGrade: '6' },
 						},
 						'/tmp/out/top.config'
 					);

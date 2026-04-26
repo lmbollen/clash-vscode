@@ -170,14 +170,47 @@ export interface NextpnrOptions {
 	seed?: number;
 
 	/**
-	 * Enable detailed timing report
+	 * Write a routed-layout SVG alongside other outputs.  Handy for
+	 * visualising where the design ended up on the fabric.
 	 */
-	timing?: boolean;
+	routedSvg?: boolean;
 
 	/**
 	 * Additional nextpnr arguments
 	 */
 	extraArgs?: string[];
+}
+
+/**
+ * One step of a critical path — an edge in the post-route timing graph.
+ * Types emitted by nextpnr include 'source', 'routing', 'setup', 'clk-to-q'.
+ */
+export interface CriticalPathStep {
+	/** Delay contributed by this step (nanoseconds). */
+	delay: number;
+	/** Step kind as reported by nextpnr. */
+	type: string;
+	/** Source cell name, when this step has one. */
+	fromCell?: string;
+	/** Destination cell name. */
+	toCell?: string;
+	/** Net carrying the signal (populated for routing edges). */
+	net?: string;
+}
+
+/**
+ * A single critical path: start/end (clock domains or async) and the chain
+ * of steps with their accumulated delay.
+ */
+export interface CriticalPath {
+	/** Launch clock / async source (e.g. "posedge clk$..."). */
+	from: string;
+	/** Capture clock / async sink. */
+	to: string;
+	/** Sum of step delays, ns. */
+	totalDelay: number;
+	/** Ordered path steps. */
+	steps: CriticalPathStep[];
 }
 
 /**
@@ -200,6 +233,16 @@ export interface NextpnrResult {
 	bitstreamPath?: string;
 
 	/**
+	 * Path to the JSON report written by nextpnr's --report flag
+	 */
+	reportJsonPath?: string;
+
+	/**
+	 * Path to the routed-layout SVG (if --routed-svg was requested)
+	 */
+	routedSvgPath?: string;
+
+	/**
 	 * Combined stdout/stderr output
 	 */
 	output: string;
@@ -213,6 +256,12 @@ export interface NextpnrResult {
 	 * Resource utilization
 	 */
 	utilization?: UtilizationInfo;
+
+	/**
+	 * Critical paths reported by nextpnr's --report.
+	 * One entry per reported path, sorted by totalDelay descending.
+	 */
+	criticalPaths?: CriticalPath[];
 
 	/**
 	 * Warnings from nextpnr

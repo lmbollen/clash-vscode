@@ -1,13 +1,19 @@
 {
-  "name": "clash-vscode-yosys",
-  "displayName": "Clash Verilog Yosys Extension",
-  "description": "Synthesize Verilog from monomorphic Haskell functions using Clash and Yosys",
-  "version": "0.0.1",
-  "publisher": "clash-lang",
+  "name": "clash-toolkit",
+  "displayName": "Clash Toolkit",
+  "description": "Community extension for Clash: synthesize, view schematics, and place-and-route Haskell hardware designs with Yosys and nextpnr.",
+  "version": "0.1.0",
+  "license": "BSD-2-Clause",
+  "publisher": "lmbollen",
+  "icon": "resources/clash-icon.png",
   "repository": {
     "type": "git",
-    "url": "https://github.com/yourusername/clash-vscode-yosys"
+    "url": "https://github.com/lmbollen/clash-toolkit"
   },
+  "bugs": {
+    "url": "https://github.com/lmbollen/clash-toolkit/issues"
+  },
+  "homepage": "https://github.com/lmbollen/clash-toolkit#readme",
   "engines": {
     "vscode": "^1.85.0"
   },
@@ -40,65 +46,70 @@
     "views": {
       "clash-synthesis": [
         {
-          "id": "clash-vscode-yosys.haskellFunctions",
+          "id": "clash-toolkit.haskellFunctions",
           "name": "Haskell Functions"
         },
         {
-          "id": "clash-vscode-yosys.synthesisResults",
+          "id": "clash-toolkit.synthesisResults",
           "name": "Synthesis Results"
         }
       ]
     },
     "commands": [
       {
-        "command": "clash-vscode-yosys.detectFunctions",
+        "command": "clash-toolkit.detectFunctions",
         "title": "Clash: Detect Functions"
       },
       {
-        "command": "clash-vscode-yosys.synthesizeFunction",
+        "command": "clash-toolkit.synthesizeFunction",
         "title": "Clash: Generate Verilog",
         "icon": "$(file-code)"
       },
       {
-        "command": "clash-vscode-yosys.synthesizeOnly",
+        "command": "clash-toolkit.elaborate",
+        "title": "Clash: Elaborate",
+        "icon": "$(symbol-structure)"
+      },
+      {
+        "command": "clash-toolkit.synthesize",
         "title": "Clash: Synthesize",
         "icon": "$(circuit-board)"
       },
       {
-        "command": "clash-vscode-yosys.synthesizeAndPnR",
-        "title": "Clash: Synthesize and Place & Route",
+        "command": "clash-toolkit.placeAndRoute",
+        "title": "Clash: Place & Route",
         "icon": "$(layers)"
       },
       {
-        "command": "clash-vscode-yosys.checkToolchain",
+        "command": "clash-toolkit.checkToolchain",
         "title": "Clash: Check Toolchain"
       },
       {
-        "command": "clash-vscode-yosys.openResultsPanel",
+        "command": "clash-toolkit.openResultsPanel",
         "title": "Clash: Open Synthesis Results Panel",
         "icon": "$(open-preview)"
       },
       {
-        "command": "clash-vscode-yosys.refreshHaskellFunctions",
+        "command": "clash-toolkit.refreshHaskellFunctions",
         "title": "Clash: Refresh Haskell Functions",
         "icon": "$(refresh)"
       },
       {
-        "command": "clash-vscode-yosys.viewModuleDiagram",
+        "command": "clash-toolkit.viewModuleDiagram",
         "title": "Clash: View Module Diagram",
         "icon": "$(open-preview)"
       },
       {
-        "command": "clash-vscode-yosys.goToFunction",
+        "command": "clash-toolkit.goToFunction",
         "title": "Clash: Go To Function"
       },
       {
-        "command": "clash-vscode-yosys.openSynthesizedVerilog",
+        "command": "clash-toolkit.openSynthesizedVerilog",
         "title": "Clash: Open Synthesized Verilog",
         "icon": "$(file-code)"
       },
       {
-        "command": "clash-vscode-yosys.openSettings",
+        "command": "clash-toolkit.openSettings",
         "title": "Clash: Open Settings",
         "icon": "$(gear)"
       }
@@ -106,63 +117,68 @@
     "menus": {
       "view/title": [
         {
-          "command": "clash-vscode-yosys.synthesizeFunction",
-          "when": "view == clash-vscode-yosys.haskellFunctions",
+          "command": "clash-toolkit.synthesizeFunction",
+          "when": "view == clash-toolkit.haskellFunctions",
           "group": "navigation@1"
         },
         {
-          "command": "clash-vscode-yosys.synthesizeOnly",
-          "when": "view == clash-vscode-yosys.haskellFunctions",
+          "command": "clash-toolkit.elaborate",
+          "when": "view == clash-toolkit.haskellFunctions",
           "group": "navigation@2"
         },
         {
-          "command": "clash-vscode-yosys.synthesizeAndPnR",
-          "when": "view == clash-vscode-yosys.haskellFunctions",
+          "command": "clash-toolkit.synthesize",
+          "when": "view == clash-toolkit.haskellFunctions",
           "group": "navigation@3"
         },
         {
-          "command": "clash-vscode-yosys.refreshHaskellFunctions",
-          "when": "view == clash-vscode-yosys.haskellFunctions",
+          "command": "clash-toolkit.placeAndRoute",
+          "when": "view == clash-toolkit.haskellFunctions",
           "group": "navigation@4"
         },
         {
-          "command": "clash-vscode-yosys.openSettings",
-          "when": "view == clash-vscode-yosys.haskellFunctions",
+          "command": "clash-toolkit.refreshHaskellFunctions",
+          "when": "view == clash-toolkit.haskellFunctions",
           "group": "navigation@5"
         },
         {
-          "command": "clash-vscode-yosys.openResultsPanel",
-          "when": "view == clash-vscode-yosys.synthesisResults",
+          "command": "clash-toolkit.openSettings",
+          "when": "view == clash-toolkit.haskellFunctions",
+          "group": "navigation@6"
+        },
+        {
+          "command": "clash-toolkit.openResultsPanel",
+          "when": "view == clash-toolkit.synthesisResults",
           "group": "navigation@1"
         },
         {
-          "command": "clash-vscode-yosys.openSettings",
-          "when": "view == clash-vscode-yosys.synthesisResults",
+          "command": "clash-toolkit.openSettings",
+          "when": "view == clash-toolkit.synthesisResults",
           "group": "navigation@2"
         }
       ],
       "view/item/context": [
         {
-          "command": "clash-vscode-yosys.openSynthesizedVerilog",
-          "when": "view == clash-vscode-yosys.synthesisResults && viewItem =~ /verilog/",
+          "command": "clash-toolkit.openSynthesizedVerilog",
+          "when": "view == clash-toolkit.synthesisResults && viewItem =~ /verilog/",
           "group": "inline@1"
         },
         {
-          "command": "clash-vscode-yosys.viewModuleDiagram",
-          "when": "view == clash-vscode-yosys.synthesisResults && viewItem =~ /diagram/",
+          "command": "clash-toolkit.viewModuleDiagram",
+          "when": "view == clash-toolkit.synthesisResults && viewItem =~ /diagram/",
           "group": "inline@2"
         }
       ]
     },
     "configuration": {
-      "title": "Clash Verilog Yosys",
+      "title": "Clash Toolkit",
       "properties": {
-        "clash-vscode-yosys.yosysCommand": {
+        "clash-toolkit.yosysCommand": {
           "type": "string",
           "default": "yosys",
           "description": "Command to run Yosys"
         },
-        "clash-vscode-yosys.outputFormat": {
+        "clash-toolkit.outputFormat": {
           "type": "string",
           "enum": [
             "verilog",
@@ -172,17 +188,17 @@
           "default": "verilog",
           "description": "HDL output format for Clash"
         },
-        "clash-vscode-yosys.autoCleanup": {
+        "clash-toolkit.autoCleanup": {
           "type": "boolean",
           "default": false,
           "description": "Automatically cleanup temporary synthesis files"
         },
-        "clash-vscode-yosys.showYosysSchematic": {
+        "clash-toolkit.showYosysSchematic": {
           "type": "boolean",
           "default": false,
           "description": "Show schematic visualization after Yosys synthesis"
         },
-        "clash-vscode-yosys.synthesisMode": {
+        "clash-toolkit.synthesisMode": {
           "type": "string",
           "enum": [
             "whole-design",
@@ -191,7 +207,20 @@
           "default": "per-module",
           "description": "Synthesis mode: whole-design synthesizes everything at once; per-module synthesizes each component separately with individual diagrams"
         },
-        "clash-vscode-yosys.synthesisTarget": {
+        "clash-toolkit.pnrTargetFrequencyMHz": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "default": null,
+          "description": "Target frequency in MHz passed to nextpnr as --freq. Used when no SDC file is present; with an SDC, the SDC constraint takes precedence. Leave blank to let nextpnr report Fmax without a target."
+        },
+        "clash-toolkit.pnrWriteRoutedSvg": {
+          "type": "boolean",
+          "default": true,
+          "description": "Write a routed-layout SVG alongside the nextpnr output — useful for visualising where the design landed on the fabric."
+        },
+        "clash-toolkit.synthesisTarget": {
           "type": "string",
           "enum": [
             "generic",
@@ -216,49 +245,55 @@
           "default": "generic",
           "description": "Target FPGA family for Yosys synthesis"
         },
-        "clash-vscode-yosys.synthesisScript.generic": {
+        "clash-toolkit.elaborationScript": {
+          "type": "string",
+          "default": "",
+          "editPresentation": "multilineText",
+          "description": "Custom Yosys script for the Elaboration stage (hierarchy + proc, no technology mapping). Leave empty to use the built-in default. Placeholders: {files}, {topModule}, {outputDir}, {outputBaseName}"
+        },
+        "clash-toolkit.synthesisScript.generic": {
           "type": "string",
           "default": "",
           "editPresentation": "multilineText",
           "description": "Custom Yosys script for Generic target. Leave empty to use the built-in default. Placeholders: {files}, {topModule}, {outputDir}, {outputBaseName}"
         },
-        "clash-vscode-yosys.synthesisScript.ice40": {
+        "clash-toolkit.synthesisScript.ice40": {
           "type": "string",
           "default": "",
           "editPresentation": "multilineText",
           "description": "Custom Yosys script for iCE40 target. Leave empty to use the built-in default. Placeholders: {files}, {topModule}, {outputDir}, {outputBaseName}"
         },
-        "clash-vscode-yosys.synthesisScript.ecp5": {
+        "clash-toolkit.synthesisScript.ecp5": {
           "type": "string",
           "default": "",
           "editPresentation": "multilineText",
           "description": "Custom Yosys script for ECP5 target. Leave empty to use the built-in default. Placeholders: {files}, {topModule}, {outputDir}, {outputBaseName}"
         },
-        "clash-vscode-yosys.synthesisScript.xilinx": {
+        "clash-toolkit.synthesisScript.xilinx": {
           "type": "string",
           "default": "",
           "editPresentation": "multilineText",
           "description": "Custom Yosys script for Xilinx target. Leave empty to use the built-in default. Placeholders: {files}, {topModule}, {outputDir}, {outputBaseName}"
         },
-        "clash-vscode-yosys.synthesisScript.gowin": {
+        "clash-toolkit.synthesisScript.gowin": {
           "type": "string",
           "default": "",
           "editPresentation": "multilineText",
           "description": "Custom Yosys script for Gowin target. Leave empty to use the built-in default. Placeholders: {files}, {topModule}, {outputDir}, {outputBaseName}"
         },
-        "clash-vscode-yosys.synthesisScript.intel": {
+        "clash-toolkit.synthesisScript.intel": {
           "type": "string",
           "default": "",
           "editPresentation": "multilineText",
           "description": "Custom Yosys script for Intel target. Leave empty to use the built-in default. Placeholders: {files}, {topModule}, {outputDir}, {outputBaseName}"
         },
-        "clash-vscode-yosys.synthesisScript.quicklogic": {
+        "clash-toolkit.synthesisScript.quicklogic": {
           "type": "string",
           "default": "",
           "editPresentation": "multilineText",
           "description": "Custom Yosys script for QuickLogic target. Leave empty to use the built-in default. Placeholders: {files}, {topModule}, {outputDir}, {outputBaseName}"
         },
-        "clash-vscode-yosys.synthesisScript.sf2": {
+        "clash-toolkit.synthesisScript.sf2": {
           "type": "string",
           "default": "",
           "editPresentation": "multilineText",
@@ -269,12 +304,15 @@
   },
   "scripts": {
     "vscode:prepublish": "npm run compile",
+    "clean": "rm -rf out",
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
-    "pretest": "npm run compile && npm run lint",
+    "pretest": "npm run clean && npm run compile && npm run lint",
     "lint": "eslint src",
     "test": "VSCODE_EXECUTABLE_PATH=${VSCODE_EXECUTABLE_PATH:-code} node ./out/test/runTest.js",
-    "test:unit": "echo 'Unit tests require running in VS Code test environment. Use F5 with Extension Tests configuration.'"
+    "test:unit": "echo 'Unit tests require running in VS Code test environment. Use F5 with Extension Tests configuration.'",
+    "package": "vsce package",
+    "publish": "vsce publish"
   },
   "devDependencies": {
     "@types/mocha": "^10.0.10",
@@ -283,6 +321,7 @@
     "@typescript-eslint/eslint-plugin": "^8.0.0",
     "@typescript-eslint/parser": "^8.0.0",
     "@vscode/test-electron": "^2.4.0",
+    "@vscode/vsce": "^3.9.1",
     "eslint": "^9.0.0",
     "glob": "^10.5.0",
     "mocha": "^10.8.2",

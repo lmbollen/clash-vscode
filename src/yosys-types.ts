@@ -21,8 +21,8 @@ export interface YosysOptions {
 	/** Technology library file (optional) */
 	libertyFile?: string;
 	
-	/** Target FPGA family (optional) */
-	targetFamily?: 'ice40' | 'ecp5' | 'xilinx' | 'gowin' | 'intel' | 'quicklogic' | 'sf2' | 'generic';
+	/** Target FPGA family (optional). Use 'elaborate' for the elaboration-only stage. */
+	targetFamily?: 'ice40' | 'ecp5' | 'xilinx' | 'gowin' | 'intel' | 'quicklogic' | 'sf2' | 'generic' | 'elaborate';
 
 	/** User-customized synthesis script template. Overrides the default for targetFamily. */
 	customScript?: string;
@@ -87,16 +87,19 @@ export interface ModuleSynthesisResult {
 export interface SynthesisStatistics {
 	/** Number of cells in design */
 	cellCount?: number;
-	
+
 	/** Number of wires in design */
 	wireCount?: number;
-	
+
 	/** Chip area (if available) */
 	chipArea?: number;
-	
+
 	/** Number of different cell types */
 	cellTypes?: Map<string, number>;
-	
+
+	/** Longest topological path length (reported by `ltp`), in cells. */
+	logicDepth?: number;
+
 	/** Raw statistics text */
 	rawStats: string;
 }

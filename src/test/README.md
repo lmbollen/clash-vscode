@@ -1,6 +1,6 @@
 # Extension Tests
 
-This directory contains tests for the Clash VS Code Yosys extension.
+This directory contains tests for the Clash Toolkit.
 
 ## Structure
 

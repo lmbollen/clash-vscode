@@ -1,4 +1,6 @@
-# Clash VS Code Yosys Extension
+# Clash Toolkit
+
+> **Community extension** — maintained by [Lucas Bollen](https://github.com/lmbollen) (QBayLogic). Not an official release of the [Clash](https://clash-lang.org/) project.
 
 Synthesize Verilog from Haskell functions using [Clash](https://clash-lang.org/), explore the result with [Yosys](https://yosyshq.net/yosys/), and place-and-route for ECP5 FPGAs with [nextpnr](https://github.com/YosysHQ/nextpnr) — all from inside VS Code.
 
@@ -33,4 +35,4 @@ Highlights:
 
 ## License
 
-[Add your license here]
+[BSD 2-Clause](LICENSE) © 2026 Lucas Bollen.

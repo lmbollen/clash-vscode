@@ -1,6 +1,5 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
-import { PipelineCache, CachedCompilation, CachedSynthesis } from './pipeline-cache';
 import { HLSClient } from './hls-client';
 import { FunctionDetector } from './function-detector';
 import { CodeGenerator, GenerationConfig } from './code-generator';
@@ -17,6 +16,7 @@ import { SynthesisResultsPanel } from './synthesis-results-panel';
 import { SynthesisSettingsPanel } from './synthesis-settings-panel';
 import { SynthesisResultsTreeProvider } from './synthesis-results-tree';
 import { HaskellFunctionsTreeProvider, FunctionNode } from './haskell-functions-tree';
+import { getDefaultElaborationScript } from './synthesis-targets';
 
 // Output channel for logging
 let outputChannel: vscode.OutputChannel;
@@ -51,11 +51,6 @@ interface SynthesisOutput {
 	projectDirs: CompilationOutput['projectDirs'];
 }
 
-// ── Pipeline result cache ─────────────────────────────────────────────────────
-// Keyed by filePath:funcName (compilation) and filePath:funcName:mode (synthesis).
-// Cleared when the source file is saved so stale results never survive an edit.
-const pipelineCache = new PipelineCache();
-
 export function activate(context: vscode.ExtensionContext) {
 
 	// Create output channel for logging
@@ -83,7 +78,7 @@ export function activate(context: vscode.ExtensionContext) {
 	synthesisTreeProvider = new SynthesisResultsTreeProvider();
 	context.subscriptions.push(
 		vscode.window.registerTreeDataProvider(
-			'clash-vscode-yosys.synthesisResults',
+			'clash-toolkit.synthesisResults',
 			synthesisTreeProvider
 		)
 	);
@@ -93,7 +88,7 @@ export function activate(context: vscode.ExtensionContext) {
 	// property so title-bar buttons can read the currently selected function.
 	haskellFunctionsTreeProvider = new HaskellFunctionsTreeProvider();
 	haskellFunctionsTreeView = vscode.window.createTreeView(
-		'clash-vscode-yosys.haskellFunctions',
+		'clash-toolkit.haskellFunctions',
 		{ treeDataProvider: haskellFunctionsTreeProvider }
 	);
 	context.subscriptions.push(haskellFunctionsTreeView);
@@ -109,7 +104,8 @@ export function activate(context: vscode.ExtensionContext) {
 	);
 
 	// Refresh the functions view when a Haskell file is saved.
-	// Cache invalidation is handled by cabal — see getOrCompile.
+	// Refreshes the tree only — there is no extension-level cache to invalidate;
+	// cabal handles incremental compilation correctly on its own.
 	context.subscriptions.push(
 		vscode.workspace.onDidSaveTextDocument(doc => {
 			if (hlsClient.isHaskellDocument(doc)) {
@@ -128,21 +124,21 @@ export function activate(context: vscode.ExtensionContext) {
 
 	// Command: open extension settings panel
 	context.subscriptions.push(
-		vscode.commands.registerCommand('clash-vscode-yosys.openSettings', () => {
+		vscode.commands.registerCommand('clash-toolkit.openSettings', () => {
 			SynthesisSettingsPanel.show();
 		})
 	);
 
 	// Command: (re-)open the synthesis results panel from the sidebar
 	context.subscriptions.push(
-		vscode.commands.registerCommand('clash-vscode-yosys.openResultsPanel', () => {
+		vscode.commands.registerCommand('clash-toolkit.openResultsPanel', () => {
 			SynthesisResultsPanel.reopen();
 		})
 	);
 
 	// Command: open the Verilog files for a module (inline tree action)
 	context.subscriptions.push(
-		vscode.commands.registerCommand('clash-vscode-yosys.openSynthesizedVerilog', async (item) => {
+		vscode.commands.registerCommand('clash-toolkit.openSynthesizedVerilog', async (item) => {
 			const files: string[] | undefined = item?.result?.verilogFiles;
 			if (!files?.length) {
 				vscode.window.showInformationMessage('No Verilog files available for this module.');
@@ -157,7 +153,7 @@ export function activate(context: vscode.ExtensionContext) {
 
 	// Command: refresh the Haskell functions tree manually
 	context.subscriptions.push(
-		vscode.commands.registerCommand('clash-vscode-yosys.refreshHaskellFunctions', () => {
+		vscode.commands.registerCommand('clash-toolkit.refreshHaskellFunctions', () => {
 			const editor = vscode.window.activeTextEditor;
 			if (editor && hlsClient.isHaskellDocument(editor.document)) {
 				refreshHaskellFunctionsTree(editor.document);
@@ -167,7 +163,7 @@ export function activate(context: vscode.ExtensionContext) {
 
 	// Command: open diagram viewer for a specific module (inline tree action)
 	context.subscriptions.push(
-		vscode.commands.registerCommand('clash-vscode-yosys.viewModuleDiagram', (item) => {
+		vscode.commands.registerCommand('clash-toolkit.viewModuleDiagram', (item) => {
 			const moduleName: string | undefined = item?.result?.name;
 			SynthesisResultsPanel.reopen(moduleName);
 		})
@@ -175,7 +171,7 @@ export function activate(context: vscode.ExtensionContext) {
 
 	// Command: navigate to a function (used by tree item clicks)
 	context.subscriptions.push(
-		vscode.commands.registerCommand('clash-vscode-yosys.goToFunction', async (info) => {
+		vscode.commands.registerCommand('clash-toolkit.goToFunction', async (info) => {
 			if (!info?.filePath || !info?.range) { return; }
 			const uri = vscode.Uri.file(info.filePath);
 			const doc = await vscode.workspace.openTextDocument(uri);
@@ -204,7 +200,7 @@ export function activate(context: vscode.ExtensionContext) {
 		)
 	);
 
-	outputChannel.appendLine('Clash Verilog Yosys Extension activated');
+	outputChannel.appendLine('Clash Toolkit activated');
 	outputChannel.appendLine('Make sure Haskell Language Server is running for full functionality');
 	
 	// Validate toolchain on activation (after a brief delay for direnv)
@@ -245,35 +241,42 @@ async function refreshHaskellFunctionsTree(doc: vscode.TextDocument): Promise<vo
 function registerCommands(context: vscode.ExtensionContext) {
 	// Detect Functions command
 	context.subscriptions.push(
-		vscode.commands.registerCommand('clash-vscode-yosys.detectFunctions', async () => {
+		vscode.commands.registerCommand('clash-toolkit.detectFunctions', async () => {
 			await detectFunctionsCommand();
 		})
 	);
 
 	// Synthesize Function command
 	context.subscriptions.push(
-		vscode.commands.registerCommand('clash-vscode-yosys.synthesizeFunction', async (arg?: unknown) => {
+		vscode.commands.registerCommand('clash-toolkit.synthesizeFunction', async (arg?: unknown) => {
 			await synthesizeFunctionCommand(unwrapFuncArg(arg));
 		})
 	);
 
-	// Synthesize and Place & Route command
+	// Elaborate command — hierarchy + proc, no technology mapping
 	context.subscriptions.push(
-		vscode.commands.registerCommand('clash-vscode-yosys.synthesizeAndPnR', async (arg?: unknown) => {
-			await synthesizeAndPnRCommand(unwrapFuncArg(arg));
+		vscode.commands.registerCommand('clash-toolkit.elaborate', async (arg?: unknown) => {
+			await elaborateCommand(unwrapFuncArg(arg));
 		})
 	);
 
-	// Synthesize Only command (no PnR)
+	// Place & Route command
 	context.subscriptions.push(
-		vscode.commands.registerCommand('clash-vscode-yosys.synthesizeOnly', async (arg?: unknown) => {
-			await synthesizeOnlyCommand(unwrapFuncArg(arg));
+		vscode.commands.registerCommand('clash-toolkit.placeAndRoute', async (arg?: unknown) => {
+			await placeAndRouteCommand(unwrapFuncArg(arg));
+		})
+	);
+
+	// Synthesize command (no PnR)
+	context.subscriptions.push(
+		vscode.commands.registerCommand('clash-toolkit.synthesize', async (arg?: unknown) => {
+			await synthesizeCommand(unwrapFuncArg(arg));
 		})
 	);
 
 	// Check toolchain availability
 	context.subscriptions.push(
-		vscode.commands.registerCommand('clash-vscode-yosys.checkToolchain', async () => {
+		vscode.commands.registerCommand('clash-toolkit.checkToolchain', async () => {
 			const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
 			toolchain.clearCache();
 			await toolchain.checkAll(cwd);
@@ -382,7 +385,7 @@ async function detectFunctionsCommand() {
 				}
 				
 				if (action === 'Synthesize') {
-					await synthesizeOnlyCommand(selected);
+					await synthesizeCommand(selected);
 				}
 			} else {
 				if (logger) {
@@ -555,15 +558,15 @@ async function runYosynsSynthesis(
 }
 
 /**
- * Generate the Clash wrapper, then either return a cached compilation or
- * run the full Clash build.
+ * Generate the Clash wrapper and run the full Clash build.
  *
- * Cache validation uses `cabal build` rather than file-save monitoring:
- * cabal tracks all transitive dependencies, so edits to libraries that
- * the synthesised function depends on are caught reliably — something
- * file-save watchers cannot do.
+ * Caching at the extension level is intentionally absent — cabal already
+ * does its own incremental build, which is the only correctness-safe layer
+ * that knows about transitive dependencies.  Anything we layered on top of
+ * that risked returning stale Verilog after edits cabal couldn't observe
+ * (TH splices, env-driven generation, ...), so we always re-dispatch.
  */
-async function getOrCompile(
+async function runCompile(
 	func: FunctionInfo,
 	wsRoot: string,
 	progress: ProgressReporter
@@ -571,33 +574,12 @@ async function getOrCompile(
 	const projectDirs = CodeGenerator.getProjectDirectories(wsRoot, func);
 	const genConfig: GenerationConfig = { keepFiles: true, modulePrefix: 'ClashSynth_' };
 
-	// Wrapper generation is cheap (write-if-changed preserves mtime when
-	// the content is identical, so cabal won't rebuild unnecessarily).
 	progress.report({ message: 'Generating Clash wrapper…', increment: 10 });
 	outputChannel.appendLine('\n=== Step 1: Generating Clash Wrapper ===');
 	const wrapperResult = await codeGenerator.generateWrapper(func, genConfig, wsRoot);
 	outputChannel.appendLine(`✓ Generated: ${wrapperResult.filePath}`);
 
 	const synthInfo = await codeGenerator.ensureSynthProject(wsRoot, func.filePath);
-
-	// Ask cabal whether the package is up to date.  If it is AND we have a
-	// cached result with Verilog files still on disk, skip recompilation.
-	const cached = await pipelineCache.getCompilation(func) as CompilationOutput | undefined;
-	if (cached) {
-		progress.report({ message: 'Checking dependencies…', increment: 5 });
-		const upToDate = await clashCompiler.isUpToDate({
-			workspaceRoot: wsRoot,
-			synthProjectRoot: synthInfo.synthRoot,
-			cabalProjectDir: synthInfo.cabalProjectDir ?? undefined
-		});
-		if (upToDate) {
-			outputChannel.appendLine('  ↩ Using cached Verilog (cabal reports up to date)');
-			progress.report({ message: 'Using cached Verilog…', increment: 15 });
-			return cached;
-		}
-		outputChannel.appendLine('  ⟳ Dependencies changed — recompiling');
-		pipelineCache.invalidateFunction(func);
-	}
 
 	progress.report({ message: 'Compiling to Verilog with Clash…', increment: 20 });
 	outputChannel.appendLine('\n=== Step 2: Compiling with Clash ===');
@@ -624,17 +606,14 @@ async function getOrCompile(
 		?? path.basename(compileResult.verilogPath!, '.v');
 	const verilogInput = compileResult.allVerilogFiles ?? compileResult.verilogPath!;
 
-	const result = { wrapperResult, compileResult, projectDirs, topModule, verilogInput };
-	pipelineCache.setCompilation(func, result as unknown as CachedCompilation);
-	return result;
+	return { wrapperResult, compileResult, projectDirs, topModule, verilogInput };
 }
 
 /**
- * Return a cached SynthesisOutput if the netlist still exists, otherwise run
- * Yosys and store the result.  Also caches the compilation result used so that
- * the next call to getOrCompile for the same function is always a cache hit.
+ * Run the full Clash → Yosys pipeline.  Always re-runs both stages — see
+ * runCompile for why we don't memoize at the extension level.
  */
-async function getOrSynthesize(
+async function runPipeline(
 	func: FunctionInfo,
 	wsRoot: string,
 	synthesisMode: string,
@@ -642,17 +621,8 @@ async function getOrSynthesize(
 	progress: ProgressReporter,
 	customScript?: string
 ): Promise<{ compiled: CompilationOutput; synthesis: SynthesisOutput }> {
-	const cacheMode = `${synthesisMode}:${targetFamily}`;
-	const cachedSynth = await pipelineCache.getSynthesis(func, cacheMode) as SynthesisOutput | undefined;
-	if (cachedSynth) {
-		outputChannel.appendLine('  ↩ Using cached synthesis (source unchanged)');
-		progress.report({ message: 'Using cached synthesis…', increment: 90 });
-		const cachedCompile = await pipelineCache.getCompilation(func) as CompilationOutput | undefined;
-		return { compiled: cachedCompile ?? cachedSynth as unknown as CompilationOutput, synthesis: cachedSynth };
-	}
-	const compiled = await getOrCompile(func, wsRoot, progress);
+	const compiled = await runCompile(func, wsRoot, progress);
 	const synthesis = await runYosynsSynthesis(compiled, wsRoot, synthesisMode, targetFamily, progress, customScript);
-	pipelineCache.setSynthesis(func, cacheMode, synthesis as unknown as CachedSynthesis);
 	return { compiled, synthesis };
 }
 
@@ -680,7 +650,7 @@ async function synthesizeFunctionCommand(providedFunc?: FunctionInfo) {
 			title: `Compiling ${func.name} to Verilog`,
 			cancellable: false
 		}, async (progress) => {
-			const { compileResult } = await getOrCompile(func, wsRoot, progress);
+			const { compileResult } = await runCompile(func, wsRoot, progress);
 			progress.report({ message: 'Done', increment: 100 });
 
 			outputChannel.appendLine('');
@@ -704,15 +674,90 @@ async function synthesizeFunctionCommand(providedFunc?: FunctionInfo) {
 }
 
 /**
+ * Command: Elaborate
+ * Runs Clash → Yosys with an elaboration-only script (hierarchy + proc,
+ * no technology mapping), then opens the diagram panel.
+ *
+ * The elaborated netlist shows the design as Yosys understands it before
+ * any synthesis decisions — generic word-level cells (`$add`, `$mux`,
+ * `$dff`, `$mem_v2`, ...) — which is the most readable representation
+ * for inspecting what Clash produced.
+ */
+async function elaborateCommand(providedFunc?: FunctionInfo) {
+	const wsRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+	if (!wsRoot) { vscode.window.showErrorMessage('No workspace folder open'); return; }
+
+	const cfg = vscode.workspace.getConfiguration('clash-toolkit');
+	if (!(await toolchain.require('yosys', cfg.get<string>('yosysCommand', 'yosys'), '-V', wsRoot))) { return; }
+
+	const func = await pickFunction(providedFunc);
+	if (!func) { return; }
+
+	outputChannel.show(true);
+	outputChannel.appendLine('='.repeat(60));
+	outputChannel.appendLine(`Elaborate: ${func.name}`);
+	outputChannel.appendLine('='.repeat(60));
+
+	try {
+		await vscode.window.withProgress({
+			location: vscode.ProgressLocation.Notification,
+			title: `Elaborating ${func.name}`,
+			cancellable: false
+		}, async (progress) => {
+			// Elaboration uses its own script template — user-overridable via the
+			// `elaborationScript` setting.  The target dropdown is irrelevant at
+			// this stage (no tech mapping), so we pass 'generic' and ignore it.
+			const userScript = cfg.get<string>('elaborationScript', '') || undefined;
+			const customScript = userScript ?? getDefaultElaborationScript();
+
+			// Elaboration is always whole-design — per-module splitting only
+			// makes sense after synthesis has produced distinct netlists.
+			const { synthesis: { synthResult, moduleResults } } =
+				await runPipeline(
+					func, wsRoot,
+					'whole-design',
+					'elaborate',
+					progress,
+					customScript
+				);
+
+			progress.report({ message: 'Done', increment: 100 });
+			outputChannel.appendLine('');
+			outputChannel.appendLine('='.repeat(60));
+			outputChannel.appendLine('✓ Elaboration Complete!');
+			outputChannel.appendLine('='.repeat(60));
+			if (synthResult.statistics) {
+				outputChannel.appendLine(`  Cells: ${synthResult.statistics.cellCount ?? 'N/A'}`);
+				outputChannel.appendLine(`  Wires: ${synthResult.statistics.wireCount ?? 'N/A'}`);
+				if (synthResult.statistics.logicDepth !== undefined) {
+					outputChannel.appendLine(`  Logic depth: ${synthResult.statistics.logicDepth} cell(s)`);
+				}
+			}
+
+			synthesisTreeProvider.refresh(moduleResults);
+			SynthesisResultsPanel.store(moduleResults, `Elaboration — ${func.name}`, outputChannel);
+
+			vscode.window.showInformationMessage(
+				`Elaboration complete — ${func.name}. Cells: ${synthResult.statistics?.cellCount ?? 'N/A'}`
+			);
+		});
+	} catch (error) {
+		const msg = error instanceof Error ? error.message : String(error);
+		vscode.window.showErrorMessage(`Elaboration error: ${msg}`);
+		outputChannel.appendLine(`ERROR: ${msg}`);
+	}
+}
+
+/**
  * Command: Synthesize (no Place & Route)
  * Calls runClashCompilation → runYosynsSynthesis, then always opens the
  * diagram panel so the user gets circuit visualisations.
  */
-async function synthesizeOnlyCommand(providedFunc?: FunctionInfo) {
+async function synthesizeCommand(providedFunc?: FunctionInfo) {
 	const wsRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
 	if (!wsRoot) { vscode.window.showErrorMessage('No workspace folder open'); return; }
 
-	const cfg = vscode.workspace.getConfiguration('clash-vscode-yosys');
+	const cfg = vscode.workspace.getConfiguration('clash-toolkit');
 	if (!(await toolchain.require('yosys', cfg.get<string>('yosysCommand', 'yosys'), '-V', wsRoot))) { return; }
 
 	const func = await pickFunction(providedFunc);
@@ -732,7 +777,7 @@ async function synthesizeOnlyCommand(providedFunc?: FunctionInfo) {
 			const targetFamily = cfg.get<string>('synthesisTarget', 'generic');
 			const customScript = cfg.get<string>(`synthesisScript.${targetFamily}`, '') || undefined;
 			const { synthesis: { synthResult, moduleResults, sdcFrequencyMHz } } =
-				await getOrSynthesize(
+				await runPipeline(
 					func, wsRoot,
 					cfg.get<string>('synthesisMode', 'per-module'),
 					targetFamily, progress,
@@ -772,15 +817,15 @@ async function synthesizeOnlyCommand(providedFunc?: FunctionInfo) {
 }
 
 /**
- * Command: Synthesize and Place & Route
- * Calls synthesizeOnlyCommand's pipeline, then runs nextpnr for timing.
+ * Command: Place & Route
+ * Runs the synthesis pipeline, then hands the netlist to nextpnr for timing.
  * PnR always uses whole-design synthesis so nextpnr gets a merged netlist.
  */
-async function synthesizeAndPnRCommand(providedFunc?: FunctionInfo) {
+async function placeAndRouteCommand(providedFunc?: FunctionInfo) {
 	const wsRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
 	if (!wsRoot) { vscode.window.showErrorMessage('No workspace folder open'); return; }
 
-	const cfg = vscode.workspace.getConfiguration('clash-vscode-yosys');
+	const cfg = vscode.workspace.getConfiguration('clash-toolkit');
 	if (!(await toolchain.require('yosys', cfg.get<string>('yosysCommand', 'yosys'), '-V', wsRoot))) { return; }
 
 	// Determine nextpnr family from the configured synthesis target
@@ -831,7 +876,7 @@ async function synthesizeAndPnRCommand(providedFunc?: FunctionInfo) {
 			// PnR always uses whole-design synthesis (nextpnr needs a merged netlist).
 			const customScript = cfg.get<string>(`synthesisScript.${synthTarget}`, '') || undefined;
 			const { synthesis: { synthResult, moduleResults, topModule, sdcFrequencyMHz, projectDirs } } =
-				await getOrSynthesize(func, wsRoot, 'whole-design', synthTarget, progress, customScript);
+				await runPipeline(func, wsRoot, 'whole-design', synthTarget, progress, customScript);
 
 			synthesisTreeProvider.refresh(moduleResults);
 			SynthesisResultsPanel.store(moduleResults, `Synthesis Results — ${func.name}`, outputChannel);
@@ -844,17 +889,27 @@ async function synthesizeAndPnRCommand(providedFunc?: FunctionInfo) {
 			progress.report({ message: `Place and Route with ${familyInfo.binary}…`, increment: 60 });
 			outputChannel.appendLine(`\n=== Step 4: Place & Route with ${familyInfo.binary} ===`);
 
-			// Build family-specific options
+			// Build family-specific options.
+			//
+			// Target frequency precedence: an SDC constraint always wins.  If no
+			// SDC is present we fall back to the `pnrTargetFrequencyMHz` setting,
+			// which maps to nextpnr's `--freq` flag so analysis runs without an
+			// SDC still get a meaningful "did we hit the target?" verdict.
+			const userFreq = cfg.get<number | null>('pnrTargetFrequencyMHz', null);
+			const effectiveFreq = sdcFrequencyMHz
+				?? (typeof userFreq === 'number' && userFreq > 0 ? userFreq : undefined);
+
 			const selectedDevice = deviceChoice as import('./nextpnr-types').DeviceOption;
 			const pnrOpts: import('./nextpnr-types').NextpnrOptions = {
 				family: familyInfo.family,
 				jsonPath: synthResult.jsonPath,
 				outputDir: projectDirs.nextpnr,
 				topModule,
-				frequency: sdcFrequencyMHz,
+				frequency: effectiveFreq,
 				device: selectedDevice.value,
 				packageName: packageChoice?.value,
 				vopt: selectedDevice.vopt ? [selectedDevice.vopt] : undefined,
+				routedSvg: cfg.get<boolean>('pnrWriteRoutedSvg', true),
 			};
 
 			// For ECP5, also fill the legacy ecp5 field so ecppack runs
@@ -874,6 +929,11 @@ async function synthesizeAndPnRCommand(providedFunc?: FunctionInfo) {
 				throw new Error('Place and route failed — check output channel for details');
 			}
 
+			// Refresh the sidebar with both synth module results and the PNR
+			// timing / utilization / critical-path data so users see everything
+			// in the tree instead of having to scroll the output channel.
+			synthesisTreeProvider.refresh(moduleResults, pnrResult);
+
 			progress.report({ message: 'Done', increment: 100 });
 			outputChannel.appendLine('');
 			outputChannel.appendLine('='.repeat(60));
@@ -882,6 +942,12 @@ async function synthesizeAndPnRCommand(providedFunc?: FunctionInfo) {
 			outputChannel.appendLine(`  Config:    ${pnrResult.textcfgPath}`);
 			if (pnrResult.bitstreamPath) {
 				outputChannel.appendLine(`  Bitstream: ${pnrResult.bitstreamPath}`);
+			}
+			if (pnrResult.reportJsonPath) {
+				outputChannel.appendLine(`  Report:    ${pnrResult.reportJsonPath}`);
+			}
+			if (pnrResult.routedSvgPath) {
+				outputChannel.appendLine(`  Routed SVG: ${pnrResult.routedSvgPath}`);
 			}
 
 			if (pnrResult.timing) {
