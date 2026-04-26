@@ -138,7 +138,7 @@ export class FunctionNode extends vscode.TreeItem {
 
         // Navigate to the function on click
         this.command = {
-            command: 'clash-vscode-yosys.goToFunction',
+            command: 'clash-toolkit.goToFunction',
             title: 'Go to function',
             arguments: [info],
         };

@@ -38,9 +38,14 @@ hierarchy -check -top {topModule}
 # Synthesize
 ${synthLine}
 
-# Generate statistics
-stat -width
-tee -o {outputDir}/synthesis_stats.txt stat
+# Assert no unconnected / multiply-driven wires or unmapped cells
+check -assert
+
+# Machine-readable statistics (parsed by the extension)
+tee -q -o {outputDir}/stats.json stat -json
+
+# Report longest topological path (combinational depth)
+tee -q -o {outputDir}/logic_depth.txt ltp -noff
 
 # Write synthesized Verilog
 write_verilog -noattr {outputDir}/{outputBaseName}_synth.v
@@ -73,9 +78,14 @@ opt
 techmap
 opt
 
-# Generate statistics
-stat -width
-tee -o {outputDir}/synthesis_stats.txt stat
+# Assert no unconnected / multiply-driven wires or combinational loops
+check -assert
+
+# Machine-readable statistics (parsed by the extension)
+tee -q -o {outputDir}/stats.json stat -json
+
+# Report longest topological path (combinational depth)
+tee -q -o {outputDir}/logic_depth.txt ltp -noff
 
 # Write synthesized Verilog
 write_verilog -noattr {outputDir}/{outputBaseName}_synth.v
@@ -83,6 +93,32 @@ write_verilog -noattr {outputDir}/{outputBaseName}_synth.v
 # Prepare design for DigitalJS
 delete */t:$specify2 */t:$specify3
 opt_clean
+clean
+
+# Write JSON for DigitalJS
+write_json {outputDir}/{outputBaseName}.json
+`;
+
+const ELABORATION_SCRIPT = `# Read design files
+{files}
+
+# Elaborate design hierarchy
+hierarchy -check -top {topModule}
+
+# Convert processes to netlist primitives and clean up
+proc
+opt_clean
+
+# Assert no unconnected / multiply-driven wires or combinational loops
+check -assert
+
+# Machine-readable statistics (elaborated, pre-synthesis)
+tee -q -o {outputDir}/stats.json stat -json
+
+# Report longest topological path (combinational depth)
+tee -q -o {outputDir}/logic_depth.txt ltp -noff
+
+# Prepare design for DigitalJS
 clean
 
 # Write JSON for DigitalJS
@@ -158,6 +194,11 @@ export const TARGET_IDS: readonly string[] = targetList.map(t => t.id);
 /** Return the default script template for the given target id. */
 export function getDefaultScript(targetId: string): string {
 	return SYNTHESIS_TARGETS.get(targetId)?.defaultScript ?? GENERIC_SCRIPT;
+}
+
+/** Default script for the elaboration-only stage (no technology mapping). */
+export function getDefaultElaborationScript(): string {
+	return ELABORATION_SCRIPT;
 }
 
 /** Return the SynthesisTarget for the given id, falling back to generic. */

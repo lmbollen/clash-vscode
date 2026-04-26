@@ -1,6 +1,6 @@
 # Simple Clash Test Project
 
-This is a test project for the Clash VS Code Yosys extension.
+This is a test project for the Clash Toolkit.
 
 ## Building
 

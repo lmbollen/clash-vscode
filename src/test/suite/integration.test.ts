@@ -8,6 +8,7 @@ import { YosysRunner } from '../../yosys-runner';
 import { NextpnrRunner } from '../../nextpnr-runner';
 import { ClashManifestParser } from '../../clash-manifest-parser';
 import { FunctionInfo } from '../../types';
+import { getDefaultElaborationScript } from '../../synthesis-targets';
 
 
 /**
@@ -174,6 +175,70 @@ suite('Integration: Full Synthesis + PnR Flow', () => {
 		// Verify the Verilog file exists and is non-empty
 		const stat = await fs.stat(verilogPath);
 		assert.ok(stat.size > 0, 'Verilog file should be non-empty');
+	});
+
+	// ---------------------------------------------------------------
+	// Step 3b: Elaborate with Yosys (hierarchy + proc, no tech mapping)
+	// ---------------------------------------------------------------
+
+	test('Step 3b: Elaborate with Yosys', async function () {
+		this.timeout(60_000);
+
+		assert.ok(verilogPath, 'Step 3 must have produced a Verilog path');
+
+		const projectDirs = CodeGenerator.getProjectDirectories(wsRoot, testFunc);
+		const verilogInput = allVerilogFiles || verilogPath;
+
+		// Elaboration uses a dedicated output dir so it doesn't collide with the
+		// Step-4 synthesis artefacts that also live under projectDirs.yosys.
+		const elabDir = path.join(projectDirs.yosys, 'elaborate');
+		await fs.rm(elabDir, { recursive: true, force: true });
+
+		const result = await yosysRunner.synthesize({
+			workspaceRoot: wsRoot,
+			outputDir: elabDir,
+			topModule,
+			verilogPath: verilogInput,
+			targetFamily: 'elaborate',
+			customScript: getDefaultElaborationScript(),
+		});
+
+		assert.ok(
+			result.success,
+			`Yosys elaboration should succeed.\nErrors: ${result.errors.map(e => e.message).join('\n')}`
+		);
+		assert.ok(result.jsonPath, 'Elaboration should produce a JSON netlist');
+
+		const jsonStat = await fs.stat(result.jsonPath!);
+		assert.ok(jsonStat.size > 0, 'Elaboration JSON should be non-empty');
+
+		// Logic-depth sidecar should be written by the `tee -o ... ltp -noff` line.
+		const logicDepthFile = path.join(elabDir, 'logic_depth.txt');
+		const ldStat = await fs.stat(logicDepthFile);
+		assert.ok(ldStat.size > 0, 'logic_depth.txt should be non-empty');
+
+		const ltpText = await fs.readFile(logicDepthFile, 'utf8');
+		assert.ok(
+			/Longest topological path/i.test(ltpText),
+			`logic_depth.txt should contain ltp header; got:\n${ltpText}`
+		);
+
+		// Elaboration produces generic word-level cells, never tech-mapped ones.
+		const netlist = JSON.parse(await fs.readFile(result.jsonPath!, 'utf8')) as {
+			modules?: Record<string, { cells?: Record<string, { type: string }> }>;
+		};
+		const allCellTypes = new Set<string>();
+		for (const mod of Object.values(netlist.modules ?? {})) {
+			for (const cell of Object.values(mod.cells ?? {})) {
+				allCellTypes.add(cell.type);
+			}
+		}
+		for (const t of allCellTypes) {
+			assert.ok(
+				!/^(LUT[0-9]|TRELLIS_|SB_LUT|DFF\b|FD\w*E\b)/.test(t),
+				`Elaborated netlist should not contain tech-mapped cell "${t}"`
+			);
+		}
 	});
 
 	// ---------------------------------------------------------------

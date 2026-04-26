@@ -50,10 +50,15 @@ export class YosysRunner {
 		this.outputChannel.appendLine(`Generated script: ${scriptPath}`);
 		this.outputChannel.appendLine('');
 
+		// Let yosys write its own log file — more reliable than capturing
+		// stdout+stderr ourselves (survives crashes, flushes in real time).
+		const logPath = path.join(options.outputDir, 'yosys.log');
+		const yosysArgs = ['-l', logPath, '-s', scriptPath];
+
 		return new Promise((resolve) => {
 			const logger = getLogger();
-			const finishLog = logger?.command('yosys', ['-s', scriptPath], options.workspaceRoot);
-			const yosys = spawn('yosys', ['-s', scriptPath], {
+			const finishLog = logger?.command('yosys', yosysArgs, options.workspaceRoot);
+			const yosys = spawn('yosys', yosysArgs, {
 				cwd: options.workspaceRoot,
 				env: process.env
 			});
@@ -101,24 +106,17 @@ export class YosysRunner {
 				finishLog?.then(fn => fn(code));
 				this.outputChannel.appendLine('');
 				this.outputChannel.appendLine(`Yosys exited with code ${code}`);
-
-				// Save complete log to file
-				const logPath = path.join(options.outputDir, 'yosys.log');
-				const fullOutput = stdout + stderr;
-				try {
-					await fs.writeFile(logPath, fullOutput, 'utf8');
-					this.outputChannel.appendLine(`Log saved: ${logPath}`);
-				} catch (err) {
-					this.outputChannel.appendLine(`Warning: Could not save log file: ${err}`);
-				}
+				this.outputChannel.appendLine(`Log: ${logPath}`);
 
 				if (code === 0) {
 					this.outputChannel.appendLine('✓ Synthesis successful');
 
-					// Parse statistics
-					const stats = YosysRunner.parseStatisticsOutput(stdout);
+					// Parse statistics: prefer the structured stats.json written
+					// by the script's `stat -json`, fall back to text parsing
+					// for custom scripts that don't emit one.
+					const stats = await YosysRunner.loadStatistics(options.outputDir, stdout);
 
-					// Save statistics report
+					// Save human-readable statistics report
 					try {
 						const statsReport = this.formatStatisticsReport(stats);
 						const statsPath = path.join(options.outputDir, 'statistics.txt');
@@ -140,7 +138,7 @@ export class YosysRunner {
 						synthesizedVerilogPath: synthesizedPath,
 						jsonPath,
 						statistics: stats,
-						output: fullOutput,
+						output: stdout + stderr,
 						warnings,
 						errors: []
 					});
@@ -148,7 +146,7 @@ export class YosysRunner {
 					this.outputChannel.appendLine(`✗ Synthesis failed with code ${code}`);
 					resolve({
 						success: false,
-						output: fullOutput,
+						output: stdout + stderr,
 						warnings,
 						errors: errors.length > 0 ? errors : [{ message: 'Synthesis failed' }]
 					});
@@ -212,7 +210,136 @@ export class YosysRunner {
 	}
 
 	/**
-	 * Parse synthesis statistics from Yosys output
+	 * Load synthesis statistics for a run.
+	 *
+	 * Preferred path: read the `stats.json` written by the script's
+	 * `stat -json`, which is machine-readable and immune to text-format
+	 * drift.  Always augment with ltp output (and any other text-only
+	 * fields) parsed from the Yosys stdout log.
+	 *
+	 * Falls back to pure text parsing when the JSON file is missing —
+	 * e.g. if a custom script removed the `stat -json` line.
+	 */
+	static async loadStatistics(outputDir: string, textOutput: string): Promise<SynthesisStatistics> {
+		let stats: SynthesisStatistics = { rawStats: '' };
+
+		const jsonPath = path.join(outputDir, 'stats.json');
+		try {
+			const raw = await fs.readFile(jsonPath, 'utf8');
+			stats = YosysRunner.parseStatsJson(raw);
+		} catch {
+			// No stats.json — fall back to parsing the text log.
+			stats = YosysRunner.parseStatisticsOutput(textOutput);
+		}
+
+		// Always try to pull logic depth from the log — ltp isn't part of stats.json.
+		if (stats.logicDepth === undefined) {
+			const depth = YosysRunner.parseLogicDepth(textOutput);
+			if (depth !== undefined) { stats.logicDepth = depth; }
+		}
+
+		return stats;
+	}
+
+	/**
+	 * Parse the JSON emitted by `stat -json` into our SynthesisStatistics shape.
+	 *
+	 * The shape is documented at <https://yosyshq.readthedocs.io/projects/yosys/en/latest/cmd/stat.html>
+	 * and empirically contains a `design` object aggregating all modules with
+	 * `num_cells`, `num_wires`, `num_cells_by_type`, and (when `-tech`/`-liberty`
+	 * is given) `area` / `estimated_num_transistors`.
+	 */
+	static parseStatsJson(jsonText: string): SynthesisStatistics {
+		interface StatsBlock {
+			num_cells?: number;
+			num_wires?: number;
+			num_cells_by_type?: Record<string, number>;
+			area?: number | string;
+			estimated_num_transistors?: number | string;
+		}
+		interface StatsJson {
+			design?: StatsBlock;
+			modules?: Record<string, StatsBlock>;
+		}
+
+		const stats: SynthesisStatistics = { rawStats: jsonText.trim() };
+		let parsed: StatsJson;
+		try {
+			parsed = JSON.parse(jsonText) as StatsJson;
+		} catch {
+			return stats;
+		}
+
+		// Prefer the aggregated `design` block if present, otherwise merge
+		// every module (yosys omits `design` for single-module designs).
+		const block = parsed.design
+			?? (parsed.modules ? YosysRunner.mergeStatsBlocks(Object.values(parsed.modules)) : undefined);
+		if (!block) { return stats; }
+
+		if (typeof block.num_cells === 'number') { stats.cellCount = block.num_cells; }
+		if (typeof block.num_wires === 'number') { stats.wireCount = block.num_wires; }
+
+		if (block.num_cells_by_type) {
+			const types = new Map<string, number>();
+			for (const [k, v] of Object.entries(block.num_cells_by_type)) {
+				if (typeof v === 'number') { types.set(k, v); }
+			}
+			if (types.size > 0) { stats.cellTypes = types; }
+		}
+
+		// Area metrics: `area` (from -liberty) takes precedence over
+		// `estimated_num_transistors` (from -tech cmos).
+		const areaValue = block.area ?? block.estimated_num_transistors;
+		if (areaValue !== undefined) {
+			const n = typeof areaValue === 'number' ? areaValue : parseFloat(String(areaValue));
+			if (Number.isFinite(n)) { stats.chipArea = n; }
+		}
+
+		return stats;
+	}
+
+	private static mergeStatsBlocks(blocks: Array<{
+		num_cells?: number;
+		num_wires?: number;
+		num_cells_by_type?: Record<string, number>;
+		area?: number | string;
+		estimated_num_transistors?: number | string;
+	}>): {
+		num_cells: number;
+		num_wires: number;
+		num_cells_by_type: Record<string, number>;
+		area?: number | string;
+		estimated_num_transistors?: number | string;
+	} {
+		const merged: {
+			num_cells: number;
+			num_wires: number;
+			num_cells_by_type: Record<string, number>;
+			area?: number | string;
+			estimated_num_transistors?: number | string;
+		} = { num_cells: 0, num_wires: 0, num_cells_by_type: {} };
+		for (const b of blocks) {
+			merged.num_cells += b.num_cells ?? 0;
+			merged.num_wires += b.num_wires ?? 0;
+			for (const [k, v] of Object.entries(b.num_cells_by_type ?? {})) {
+				merged.num_cells_by_type[k] = (merged.num_cells_by_type[k] ?? 0) + v;
+			}
+		}
+		return merged;
+	}
+
+	/** Extract the longest topological path length from ltp output text. */
+	static parseLogicDepth(text: string): number | undefined {
+		const m = text.match(/Longest topological path in\s+\S+\s+\(length=(\d+)\)/);
+		return m ? parseInt(m[1], 10) : undefined;
+	}
+
+	/**
+	 * Parse synthesis statistics from Yosys text output.
+	 *
+	 * Prefer `loadStatistics` + the `stat -json` file when available; this
+	 * text parser is retained as a fallback for scripts that don't emit
+	 * structured output.
 	 */
 	static parseStatisticsOutput(output: string): SynthesisStatistics {
 		const stats: SynthesisStatistics = {
@@ -256,6 +383,13 @@ export class YosysRunner {
 			stats.cellTypes = cellTypes;
 		}
 
+		// Parse longest topological path length from `ltp` output.
+		// Yosys prints a line like "Longest topological path in <design> (length=N):".
+		const ltpMatch = output.match(/Longest topological path in\s+\S+\s+\(length=(\d+)\)/);
+		if (ltpMatch) {
+			stats.logicDepth = parseInt(ltpMatch[1], 10);
+		}
+
 		return stats;
 	}
 
@@ -277,6 +411,10 @@ export class YosysRunner {
 
 		if (stats.chipArea !== undefined) {
 			report += `Chip Area:          ${stats.chipArea}\n`;
+		}
+
+		if (stats.logicDepth !== undefined) {
+			report += `Logic Depth (ltp):  ${stats.logicDepth} cell(s)\n`;
 		}
 
 		if (stats.cellTypes && stats.cellTypes.size > 0) {
@@ -497,19 +635,19 @@ export class YosysRunner {
 			// finish on the resulting ~500 k flip-flop circuit.
 			script += `proc\nflatten\nopt -purge\nmemory -nomap\nopt\n\n`;
 
-			script += `stat -width\n\n`;
+			script += `# Machine-readable statistics\n`;
+			script += `tee -q -o ${path.join(moduleDir, 'stats.json')} stat -json\n`;
+			script += `# Report longest topological path (combinational depth)\n`;
+			script += `tee -q -o ${path.join(moduleDir, 'logic_depth.txt')} ltp -noff\n\n`;
 			script += `# Write RTLIL\nwrite_rtlil ${ilPath}\n\n`;
 			script += `# Prepare for DigitalJS\ndelete */t:$specify2 */t:$specify3\nopt_clean\nclean\n`;
 			script += `write_json ${jsonPath}\n`;
 
 			await fs.writeFile(scriptPath, script);
 
-			const run = await this.runYosysScript(scriptPath, options.workspaceRoot, false);
+			const moduleLogPath = path.join(moduleDir, 'yosys.log');
+			const run = await this.runYosysScript(scriptPath, options.workspaceRoot, false, undefined, undefined, moduleLogPath);
 			const elapsed = Date.now() - startTime;
-
-			try {
-				await fs.writeFile(path.join(moduleDir, 'yosys.log'), run.stdout + run.stderr);
-			} catch { /* ignore */ }
 
 			if (run.code === 0) {
 				this.outputChannel.appendLine(`  ✓ ${component.name} (${elapsed}ms)`);
@@ -521,7 +659,7 @@ export class YosysRunner {
 					diagramJsonPath: jsonPath,
 					verilogFiles: component.verilogFiles,
 					elapsedMs: elapsed,
-					statistics: YosysRunner.parseStatisticsOutput(run.stdout),
+					statistics: await YosysRunner.loadStatistics(moduleDir, run.stdout),
 					errors: []
 				});
 			} else {
@@ -615,12 +753,11 @@ export class YosysRunner {
 		const scriptPath = path.join(moduleDir, 'synth.ys');
 		await fs.writeFile(scriptPath, script);
 
-		const run = await this.runYosysScript(scriptPath, options.workspaceRoot, false, abortSignal);
+		const moduleLogPath = path.join(moduleDir, 'yosys.log');
+		const run = await this.runYosysScript(
+			scriptPath, options.workspaceRoot, false, abortSignal, undefined, moduleLogPath
+		);
 		const elapsed = Date.now() - startTime;
-
-		try {
-			await fs.writeFile(path.join(moduleDir, 'yosys.log'), run.stdout + run.stderr);
-		} catch { /* ignore */ }
 
 		if (run.code === 0) {
 			this.outputChannel.appendLine(`  ✓ ${component.name} (${elapsed}ms)`);
@@ -631,7 +768,7 @@ export class YosysRunner {
 				diagramJsonPath,
 				verilogFiles: component.verilogFiles,
 				elapsedMs: elapsed,
-				statistics: YosysRunner.parseStatisticsOutput(run.stdout),
+				statistics: await YosysRunner.loadStatistics(moduleDir, run.stdout),
 				errors: []
 			};
 		} else {
@@ -671,7 +808,8 @@ export class YosysRunner {
 		);
 		const jsonPath = path.join(options.outputDir, `${outputBaseName}.json`);
 		const diagramJsonPath = path.join(options.outputDir, `${outputBaseName}_diagram.json`);
-		const statsFile = path.join(options.outputDir, 'synthesis_stats.txt');
+		const statsJsonFile = path.join(options.outputDir, 'stats.json');
+		const ltpFile = path.join(options.outputDir, 'logic_depth.txt');
 
 		let script = `# Top Module OOC Synthesis: ${topComponent.name}\n\n`;
 
@@ -697,12 +835,14 @@ export class YosysRunner {
 			script += `proc\nopt\nfsm\nopt\nmemory\nopt\ntechmap\nopt\n\n`;
 		}
 
-		// Statistics
-		script += `stat -width\n`;
-		if (options.libertyFile) {
-			script += `stat -liberty ${options.libertyFile}\n`;
-		}
-		script += `tee -o ${statsFile} stat\n\n`;
+		// Post-synth sanity check
+		script += `check -assert\n\n`;
+
+		// Machine-readable statistics
+		const statArgs = options.libertyFile ? `-liberty ${options.libertyFile} -json` : '-json';
+		script += `tee -q -o ${statsJsonFile} stat ${statArgs}\n`;
+		script += `# Report longest topological path (combinational depth)\n`;
+		script += `tee -q -o ${ltpFile} ltp -noff\n\n`;
 
 		// Outputs
 		script += `write_verilog -noattr ${synthesizedVerilog}\n\n`;
@@ -715,18 +855,17 @@ export class YosysRunner {
 		const scriptPath = path.join(options.outputDir, 'synth_top.ys');
 		await fs.writeFile(scriptPath, script);
 
+		const logPath = path.join(options.outputDir, 'yosys.log');
 		const run = await this.runYosysScript(
-			scriptPath, options.workspaceRoot, true
+			scriptPath, options.workspaceRoot, true, undefined, undefined, logPath
 		);
 		const elapsed = Date.now() - startTime;
 
 		const fullOutput = run.stdout + run.stderr;
-		const logPath = path.join(options.outputDir, 'yosys.log');
-		try { await fs.writeFile(logPath, fullOutput); } catch { /* ignore */ }
 
 		if (run.code === 0) {
 			this.outputChannel.appendLine(`  ✓ Top module ${topComponent.name} (${elapsed}ms)`);
-			const stats = YosysRunner.parseStatisticsOutput(run.stdout);
+			const stats = await YosysRunner.loadStatistics(options.outputDir, run.stdout);
 
 			try {
 				const statsReport = this.formatStatisticsReport(stats);
@@ -800,6 +939,10 @@ export class YosysRunner {
 		diagramJsonPath: string,
 		_options: YosysOptions
 	): string {
+		const moduleDir = path.dirname(netlistPath);
+		const statsJsonPath = path.join(moduleDir, 'stats.json');
+		const ltpPath = path.join(moduleDir, 'logic_depth.txt');
+
 		let script = `# OOC Synthesis: ${component.name}\n\n`;
 
 		for (const netlist of depNetlists) {
@@ -834,7 +977,8 @@ export class YosysRunner {
 		script += `proc\nflatten\nopt -purge\nmemory -nomap\nopt\n\n`;
 
 		// Statistics (at $mem / pre-technology-map level)
-		script += `stat -width\n\n`;
+		script += `tee -q -o ${statsJsonPath} stat -json\n`;
+		script += `tee -q -o ${ltpPath} ltp -noff\n\n`;
 
 		// Write the synthesis-chain netlist (used by the top-level synthesis)
 		script += `write_json ${netlistPath}\n\n`;
@@ -864,7 +1008,8 @@ export class YosysRunner {
 		cwd: string,
 		verbose: boolean,
 		abortSignal?: AbortSignal,
-		timeoutMs = 600_000
+		timeoutMs = 600_000,
+		logFile?: string
 	): Promise<{
 		code: number | null;
 		stdout: string;
@@ -874,8 +1019,13 @@ export class YosysRunner {
 	}> {
 		return new Promise((resolve) => {
 			const logger = getLogger();
-			const finishLog = logger?.command('yosys', ['-s', scriptPath], cwd);
-			const yosys = spawn('yosys', ['-s', scriptPath], {
+			// When a logfile is requested, use yosys's native -l option —
+			// it's flushed in real time and survives a crash of this extension.
+			const args = logFile
+				? ['-l', logFile, '-s', scriptPath]
+				: ['-s', scriptPath];
+			const finishLog = logger?.command('yosys', args, cwd);
+			const yosys = spawn('yosys', args, {
 				cwd,
 				env: process.env
 			});

@@ -3,7 +3,7 @@ import { FunctionDetector } from './function-detector';
 
 /**
  * Provides code actions (Ctrl+.) for monomorphic Haskell functions,
- * offering "Synthesize" and "Synthesize + Place & Route" options.
+ * offering "Elaborate", "Synthesize", and "Place & Route" options.
  */
 export class ClashCodeActionProvider implements vscode.CodeActionProvider {
 	static readonly providedCodeActionKinds = [
@@ -24,26 +24,38 @@ export class ClashCodeActionProvider implements vscode.CodeActionProvider {
 
 		const actions: vscode.CodeAction[] = [];
 
-		// Synthesize Only
+		// Elaborate
+		const elabAction = new vscode.CodeAction(
+			`Clash: Elaborate '${func.name}'`,
+			vscode.CodeActionKind.Empty
+		);
+		elabAction.command = {
+			command: 'clash-toolkit.elaborate',
+			title: `Elaborate ${func.name}`,
+			arguments: [func]
+		};
+		actions.push(elabAction);
+
+		// Synthesize
 		const synthAction = new vscode.CodeAction(
 			`Clash: Synthesize '${func.name}'`,
 			vscode.CodeActionKind.Empty
 		);
 		synthAction.command = {
-			command: 'clash-vscode-yosys.synthesizeOnly',
+			command: 'clash-toolkit.synthesize',
 			title: `Synthesize ${func.name}`,
 			arguments: [func]
 		};
 		actions.push(synthAction);
 
-		// Synthesize + PnR
+		// Place & Route
 		const pnrAction = new vscode.CodeAction(
-			`Clash: Synthesize + Place & Route '${func.name}'`,
+			`Clash: Place & Route '${func.name}'`,
 			vscode.CodeActionKind.Empty
 		);
 		pnrAction.command = {
-			command: 'clash-vscode-yosys.synthesizeAndPnR',
-			title: `Synthesize + PnR ${func.name}`,
+			command: 'clash-toolkit.placeAndRoute',
+			title: `Place & Route ${func.name}`,
 			arguments: [func]
 		};
 		actions.push(pnrAction);

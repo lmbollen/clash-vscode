@@ -1,6 +1,6 @@
 # Configuration
 
-All settings live under `clash-vscode-yosys` in VS Code settings.
+All settings live under `clash-toolkit` in VS Code settings.
 
 | Setting | Default | Description |
 |---------|---------|-------------|

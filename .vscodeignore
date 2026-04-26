@@ -1,2 +1,44 @@
-out
-!out/**/*.d.ts
+# Source — compiled output ships in out/
+src/**
+tsconfig.json
+eslint.config.js
+
+# TypeScript declaration files: keep none in the package
+out/**/*.d.ts
+out/**/*.d.ts.map
+out/**/*.js.map
+out/test/**
+
+# Tests, fixtures, dev project
+test-project/**
+**/*.test.js
+**/*.test.ts
+
+# Documentation sources (ship a small README; the book lives on the repo)
+book/**
+docs/**
+ARCHITECTURE.md
+DESIGN.md
+ROADMAP.md
+TESTING.md
+KNOWN_WARNINGS.md
+CHECK_CRASH.md
+DEBUG_EXTENSION_HOST.md
+
+# Build / dev tooling
+flake.nix
+flake.lock
+scripts/**
+.github/**
+.vscode/**
+.vscode-test/**
+.direnv/
+
+# Repo metadata not needed at runtime
+.gitignore
+.editorconfig
+.eslintignore
+.envrc
+.direnv/
+LICENSE.txt.license
+**/.DS_Store
