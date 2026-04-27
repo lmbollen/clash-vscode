@@ -8,21 +8,27 @@ All settings live under `clash-toolkit` in VS Code settings.
 | `outputFormat` | `verilog` | HDL output format (`verilog`, `vhdl`, `systemverilog`) |
 | `autoCleanup` | `false` | Delete temporary wrapper modules after compilation |
 | `showYosysSchematic` | `false` | Open the DigitalJS circuit viewer automatically after Yosys synthesis |
-| `synthesisMode` | `whole-design` | Synthesis mode: `whole-design` synthesizes everything at once; `per-module` synthesizes each component separately with individual diagrams |
+| `outOfContext` | `false` | Out-of-context synthesis: when enabled, each component in a multi-component design is synthesized standalone with its own diagram + utilization stats |
 
-## Synthesis Mode
+## Out-of-Context Synthesis
 
-### whole-design (default)
+### Disabled (default)
 
-All components are synthesized together. The top module gets target-specific synthesis (e.g. `synth_ecp5`), and the result is a single JSON netlist and synthesized Verilog file. For multi-component designs, sub-modules are synthesized in parallel using out-of-context synthesis.
+The whole design is synthesized as a single netlist with target-specific commands (e.g. `synth_ecp5`). Produces one JSON netlist and one synthesized Verilog file. This matches what nextpnr consumes for place-and-route.
 
-### per-module
+### Enabled
 
 Each component in the dependency graph is synthesized independently, producing:
 - An `.il` (RTLIL) file per module
-- A `.json` (DigitalJS) file per module for individual circuit diagrams
+- A `.json` netlist per module
+- An `.svg` circuit diagram per module
+- Per-module statistics (cell count, wire count, logic depth)
 
-This mode is useful for inspecting the synthesis result of each sub-module individually. After synthesis, you can pick any module from a list to view its circuit diagram.
+Useful for inspecting and comparing the synthesis result of each sub-module individually. The Place & Route command always uses the whole-design path regardless of this setting; nextpnr needs a merged netlist.
+
+## Elaboration
+
+The `Clash: Elaborate` command always runs per-module — its purpose is to expose what Clash produced *before* technology mapping, so each component's hierarchy is preserved and rendered with sub-component instances shown as boxes. This setting does not affect elaboration.
 
 ## Clash Invocation
 

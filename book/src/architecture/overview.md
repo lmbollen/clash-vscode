@@ -71,7 +71,7 @@ User Code (.hs)
   YosysRunner (synthesis script → netlist JSON)
        │
        ▼
-  NextpnrRunner (PnR → timing + bitstream)
+  NextpnrRunner (PnR → timing)
        │
        ▼
   DiagramViewer (DigitalJS webview)

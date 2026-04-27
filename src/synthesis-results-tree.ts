@@ -161,7 +161,7 @@ export class ModuleTreeItem extends vscode.TreeItem {
         // contextValue drives inline button visibility in package.json.
         // Tags are appended so menu "when" clauses can use regex matching.
         let ctx = 'synthesisModule';
-        if (r.diagramJsonPath) { ctx += '-diagram'; }
+        if (r.svgPath) { ctx += '-diagram'; }
         if (r.verilogFiles?.length) { ctx += '-verilog'; }
         this.contextValue = ctx;
 

@@ -32,6 +32,35 @@ export interface GenerationResult {
 }
 
 /**
+ * Filesystem layout for a single synthesis run.
+ */
+export interface ProjectDirectories {
+    /** Function-specific root: `<workspace>/.clash/<Module.Function>` */
+    root: string;
+    /** Identifier for this run (timestamp string). */
+    runId: string;
+    /** This run's working directory: `<root>/runs/<runId>` */
+    runRoot: string;
+    /** Clash-generated Verilog: `<runRoot>/02-verilog` */
+    verilog: string;
+    /** Yosys output: `<runRoot>/03-yosys` */
+    yosys: string;
+    /** nextpnr output: `<runRoot>/04-nextpnr` */
+    nextpnr: string;
+}
+
+/**
+ * Format a `Date` as a sortable, filesystem-safe run identifier:
+ * `YYYY-MM-DD_HH-MM-SS` in local time. Sorts lexicographically by chronology
+ * within a single timezone, which is what the history view wants.
+ */
+export function formatRunId(date: Date = new Date()): string {
+    const pad = (n: number) => String(n).padStart(2, '0');
+    return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`
+         + `_${pad(date.getHours())}-${pad(date.getMinutes())}-${pad(date.getSeconds())}`;
+}
+
+/**
  * Information about the synthesis cabal project.
  */
 export interface SynthProjectInfo {
@@ -663,27 +692,63 @@ export class CodeGenerator {
     }
 
     /**
-     * Get project-specific directory structure for a function
+     * Get the directory layout for a single synthesis run.
+     *
+     * Each run is placed in its own timestamped folder under
+     * `<workspace>/.clash/<Module.Function>/runs/<runId>/` so the user keeps
+     * a history of every synthesis and can compare implementations across
+     * runs. The shared cabal project at `.clash/synth-project/` is **not**
+     * versioned per-run.
+     *
+     * If `runId` is omitted, a fresh timestamp is generated. Pass an explicit
+     * id when re-opening an old run from history.
      */
-    static getProjectDirectories(workspaceRoot: string, func: FunctionInfo): {
-        root: string;
-        verilog: string;
-        yosys: string;
-        nextpnr: string;
-    } {
+    static getProjectDirectories(
+        workspaceRoot: string,
+        func: FunctionInfo,
+        runId?: string,
+    ): ProjectDirectories {
         // Create fully qualified name: Module.Function
         const qualifiedName = func.moduleName
             ? `${func.moduleName}.${func.name}`
             : func.name;
-        
+
         const projectRoot = path.join(workspaceRoot, '.clash', qualifiedName);
-        
+        const id = runId ?? formatRunId();
+        const runRoot = path.join(projectRoot, 'runs', id);
+
         return {
             root: projectRoot,
-            verilog: path.join(projectRoot, '02-verilog'),
-            yosys: path.join(projectRoot, '03-yosys'),
-            nextpnr: path.join(projectRoot, '04-nextpnr')
+            runId: id,
+            runRoot,
+            verilog: path.join(runRoot, '02-verilog'),
+            yosys: path.join(runRoot, '03-yosys'),
+            nextpnr: path.join(runRoot, '04-nextpnr'),
         };
+    }
+
+    /**
+     * List historical run ids for a function, newest-first.
+     * Returns an empty array if the function has never been run.
+     */
+    static async listRuns(
+        workspaceRoot: string,
+        func: FunctionInfo,
+    ): Promise<string[]> {
+        const qualifiedName = func.moduleName
+            ? `${func.moduleName}.${func.name}`
+            : func.name;
+        const runsDir = path.join(workspaceRoot, '.clash', qualifiedName, 'runs');
+        try {
+            const entries = await fs.readdir(runsDir, { withFileTypes: true });
+            return entries
+                .filter(e => e.isDirectory())
+                .map(e => e.name)
+                .sort()
+                .reverse();
+        } catch {
+            return [];
+        }
     }
 
     /**

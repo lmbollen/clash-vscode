@@ -1,43 +1,29 @@
 # Circuit Diagrams
 
-The extension provides interactive circuit visualization using [DigitalJS](https://github.com/tilk/digitaljs) in a VS Code webview panel.
+The extension renders circuit diagrams as SVGs via Yosys's `show` command and Graphviz's `dot`, then opens them with VS Code's built-in image preview editor.
 
-## Viewing Diagrams
+## Viewing diagrams
 
-After Yosys synthesis, select **View Interactive Circuit** to open the diagram viewer. The viewer shows:
+- After **Clash: Elaborate**, the diagram opens automatically and one diagram is produced per module.
+- After **Clash: Synthesize**, the diagram opens automatically. With `outOfContext` enabled, each module gets its own diagram; otherwise a single whole-design diagram is rendered.
+- Click the diagram icon next to any module in the **Synthesis Results** sidebar (or the **Run History** view) to (re-)open that module's diagram.
 
-- Logic gates, flip-flops, multiplexers, and other standard cells
-- Named wires and buses with bit widths
-- Hierarchical module boundaries
+## Per-module diagrams
 
-## Controls
+The **Elaborate** command always produces one diagram per component. The top component's diagram preserves the hierarchy: sub-component instances are rendered as boxes rather than expanded into gates. Each sub-component has its own diagram showing its own internals.
 
-| Action | Input |
-|--------|-------|
-| Zoom in/out | Scroll wheel (cursor-centered) |
-| Pan | Ctrl+drag or middle-mouse drag |
-| Zoom to fit | **Fit** button in toolbar |
-
-## Per-Module Diagrams
-
-When using **per-module** synthesis mode, each component gets its own DigitalJS JSON file. After synthesis, select **View Module Diagrams** and pick a specific module from the list to view its individual circuit.
-
-## How It Works
-
-For the standard viewer, the extension uses [yosys2digitaljs](https://github.com/nickg/yosys2digitaljs) to convert Verilog directly into the DigitalJS circuit format in-process.
-
-For per-module mode, Yosys writes JSON files directly via `write_json`, and the viewer loads these pre-generated files using `DiagramViewer.showDiagramFromJson()`.
+For **Synthesize**, set `clash-toolkit.outOfContext` to `true` to get the same per-module breakdown, with each module synthesized standalone (so you also see individual utilization numbers).
 
 ## Troubleshooting
 
-### Empty circuit / no devices shown
+### "Diagram not available — Graphviz `dot` may have failed"
 
-The design may have been optimized away by Yosys (e.g. constant outputs). Check the Yosys log in `.clash/…/03-yosys/yosys.log`.
+Yosys wrote the `.dot` file but `dot` could not convert it. Most commonly this happens when synthesizing a large design whole-design: the technology-mapped netlist has too many gates for `dot` to lay out. Either enable `outOfContext` to render sub-modules individually, or use **Elaborate** to view a higher-level diagram.
 
-### `$specify2` / `$specify3` errors
+### "No diagram rendered — install Graphviz"
 
-These timing specification cells are automatically removed before JSON export (`delete */t:$specify2 */t:$specify3`).
+`dot` is not on the PATH. Install Graphviz (`nix-shell -p graphviz`, `apt install graphviz`, etc.) and re-run.
 
-### Performance issues with large designs
+### Design was optimized away
 
-Large designs with thousands of cells may be slow to render. Use per-module mode to view individual sub-modules instead.
+If Yosys's optimization passes removed everything (e.g. constant outputs), the diagram will be empty. Check `.clash/<module>/03-yosys/yosys.log`.

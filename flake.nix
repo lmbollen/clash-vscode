@@ -49,11 +49,14 @@
             
             # Hardware synthesis tools
             yosys
-            
+
+            # Graphviz — used by Yosys's `show` command to render SVG schematics
+            graphviz
+
             # FPGA place-and-route tools
             nextpnr  # nextpnr-ice40, nextpnr-ecp5, etc.
-            trellis  # ECP5 toolchain (includes ecppack)
-            
+
+
             # Useful utilities
             git
           ];
@@ -70,8 +73,8 @@
             echo "Clash version: $(clash --version 2>/dev/null || echo 'Available via ghcWithClash')"
             echo "HLS: $(haskell-language-server --version 2>/dev/null | head -n1 || echo 'installed')"
             echo "Yosys version: $(yosys -V | head -n1)"
+            echo "Graphviz dot: $(dot -V 2>&1 | head -n1)"
             echo "nextpnr-ecp5: $(nextpnr-ecp5 --version 2>/dev/null | head -n1 || echo 'installed')"
-            echo "ecppack: $(ecppack --help 2>&1 | head -n1 | grep -o '[0-9]\+\.[0-9]\+' || echo 'installed')"
             echo ""
             echo "Extension Development:"
             echo "  1. Run 'npm install' to install dependencies"

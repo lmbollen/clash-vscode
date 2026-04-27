@@ -1,4 +1,9 @@
 import * as assert from 'assert';
+import * as path from 'path';
+import * as os from 'os';
+import { promises as fs } from 'fs';
+import { spawn } from 'child_process';
+import * as vscode from 'vscode';
 import {
 	SYNTHESIS_TARGETS,
 	TARGET_IDS,
@@ -7,12 +12,14 @@ import {
 	resolveScript,
 	computeScriptDiff,
 } from '../../synthesis-targets';
+import { YosysRunner } from '../../yosys-runner';
+import { YosysOptions } from '../../yosys-types';
 
 // ── Target registry ─────────────────────────────────────────────────────────
 
 suite('Synthesis Targets — registry', () => {
 	test('SYNTHESIS_TARGETS contains all expected target ids', () => {
-		const expected = ['generic', 'ice40', 'ecp5', 'xilinx', 'gowin', 'intel', 'quicklogic', 'sf2'];
+		const expected = ['generic', 'ice40', 'ecp5', 'xilinx', 'gowin', 'quicklogic', 'sf2'];
 		for (const id of expected) {
 			assert.ok(SYNTHESIS_TARGETS.has(id), `Missing target: ${id}`);
 		}
@@ -246,4 +253,88 @@ suite('Synthesis Targets — computeScriptDiff', () => {
 		assert.ok(added.some(l => l.text === 'synth_ecp5 -top {topModule} -noccu2'));
 		assert.ok(added.some(l => l.text === 'stat -json'));
 	});
+});
+
+// ── End-to-end Yosys support per target ─────────────────────────────────────
+//
+// Regression test that catches when a target listed in SYNTHESIS_TARGETS is
+// not actually runnable on the installed Yosys — e.g. the `synth_intel`
+// command exists but its tech library files were not packaged in the build.
+// We exercise the *default script* (not just the bare `synth_*` command), so
+// a target only counts as supported if the full pipeline the extension runs
+// also succeeds (`hierarchy -check`, `check -assert`, `write_json`, etc.).
+//
+// A trivial AND gate is enough: every `synth_*` command must be able to map
+// it. If it fails, the target is genuinely unsupported on this toolchain.
+//
+// Skips cleanly when `yosys` is not on PATH so unit-only test runs still pass.
+
+const TARGET_PROBE_VERILOG = `
+module synth_target_probe (
+    input  a,
+    input  b,
+    output y
+);
+    assign y = a & b;
+endmodule
+`;
+
+function yosysOnPath(): Promise<boolean> {
+	return new Promise(resolve => {
+		const proc = spawn('yosys', ['--version'], { timeout: 5000 });
+		proc.on('error', () => resolve(false));
+		proc.on('close', code => resolve(code === 0));
+	});
+}
+
+suite('Synthesis Targets — installed Yosys supports every offered target', () => {
+	let outputChannel: vscode.OutputChannel;
+	let yosysRunner: YosysRunner;
+	let tmpDir: string;
+
+	suiteSetup(async function () {
+		this.timeout(15_000);
+		outputChannel = vscode.window.createOutputChannel('Test Synth Target Coverage');
+		yosysRunner = new YosysRunner(outputChannel);
+		tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'clash-synth-target-'));
+		await fs.writeFile(
+			path.join(tmpDir, 'synth_target_probe.v'),
+			TARGET_PROBE_VERILOG
+		);
+	});
+
+	suiteTeardown(async () => {
+		if (outputChannel) { outputChannel.dispose(); }
+		if (tmpDir) { await fs.rm(tmpDir, { recursive: true, force: true }); }
+	});
+
+	for (const targetId of TARGET_IDS) {
+		test(`target "${targetId}" runs end-to-end on installed Yosys`, async function () {
+			this.timeout(60_000);
+			if (!(await yosysOnPath())) { this.skip(); return; }
+
+			const outDir = path.join(tmpDir, targetId);
+			await fs.mkdir(outDir, { recursive: true });
+
+			const result = await yosysRunner.synthesize({
+				workspaceRoot: tmpDir,
+				outputDir: outDir,
+				topModule: 'synth_target_probe',
+				verilogPath: path.join(tmpDir, 'synth_target_probe.v'),
+				targetFamily: targetId as YosysOptions['targetFamily'],
+			});
+
+			assert.ok(
+				result.success,
+				`Target "${targetId}" is offered in SYNTHESIS_TARGETS but the ` +
+				`installed Yosys cannot run its default script.\n` +
+				`Either remove the target from synthesis-targets.ts or fix the ` +
+				`toolchain so the required tech files are present.\n` +
+				`Errors:\n  ${result.errors.map(e => e.message).join('\n  ')}`
+			);
+			assert.ok(result.jsonPath, `Target "${targetId}" produced no JSON netlist`);
+			const stat = await fs.stat(result.jsonPath!);
+			assert.ok(stat.size > 0, `Target "${targetId}" produced an empty netlist`);
+		});
+	}
 });

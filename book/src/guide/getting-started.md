@@ -10,7 +10,6 @@ The extension does **not** ship any compilers or toolchains. You must have them 
 | **Haskell Language Server** | Function detection & type info | Yes |
 | **Yosys** | Logic synthesis & statistics | For synthesis commands |
 | **nextpnr-ecp5** | Place & route | For P&R commands |
-| **ecppack** | Bitstream generation (ECP5) | For bitstream output |
 
 Run **Clash: Check Toolchain** from the command palette to verify what is available.
 

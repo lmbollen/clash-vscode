@@ -40,12 +40,3 @@ nextpnr-ecp5 \
   --lpf constraints.lpf    # when provided
 ```
 
-## Bitstream Generation
-
-For ECP5, `ecppack` converts the textual configuration to a binary bitstream:
-
-```
-ecppack input.config output.bit
-```
-
-This runs automatically after successful place & route.

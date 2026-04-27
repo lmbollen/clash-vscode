@@ -7,6 +7,7 @@ import {
 	computeScriptDiff,
 	DiffLine,
 } from './synthesis-targets';
+import { ToolchainChecker, TOOL_DEFINITIONS } from './toolchain';
 
 /**
  * Webview panel for extension settings.
@@ -19,15 +20,19 @@ export class SynthesisSettingsPanel {
 	private static currentPanel?: vscode.WebviewPanel;
 	private static messageListener?: vscode.Disposable;
 	private static configListener?: vscode.Disposable;
+	private static toolchain?: ToolchainChecker;
 
 	/**
 	 * Open (or reveal) the settings panel.
 	 */
-	static show(): void {
+	static show(toolchain: ToolchainChecker): void {
+		SynthesisSettingsPanel.toolchain = toolchain;
 		const column = vscode.ViewColumn.One;
 
 		if (SynthesisSettingsPanel.currentPanel) {
 			SynthesisSettingsPanel.currentPanel.reveal(column);
+			// Re-probe so the panel reflects current state on every open.
+			SynthesisSettingsPanel.refreshTools(SynthesisSettingsPanel.currentPanel);
 			return;
 		}
 
@@ -93,12 +98,17 @@ export class SynthesisSettingsPanel {
 						await cfg.update('elaborationScript', undefined, vscode.ConfigurationTarget.Workspace);
 						break;
 					}
-					case 'changeSynthesisMode': {
-						await cfg.update('synthesisMode', message.mode, vscode.ConfigurationTarget.Workspace);
+					case 'changeOutOfContext': {
+						await cfg.update('outOfContext', message.outOfContext, vscode.ConfigurationTarget.Workspace);
 						break;
 					}
 					case 'ready': {
 						SynthesisSettingsPanel.sendState(panel);
+						SynthesisSettingsPanel.refreshTools(panel);
+						break;
+					}
+					case 'refreshTools': {
+						SynthesisSettingsPanel.refreshTools(panel);
 						break;
 					}
 				}
@@ -119,10 +129,35 @@ export class SynthesisSettingsPanel {
 	// State
 	// -----------------------------------------------------------------------
 
+	/**
+	 * Re-probe the toolchain and push the updated tool list to the panel.
+	 * Called on initial open, on user-triggered refresh, and when the panel
+	 * is revealed again.
+	 */
+	private static async refreshTools(panel: vscode.WebviewPanel): Promise<void> {
+		const tc = SynthesisSettingsPanel.toolchain;
+		if (!tc) { return; }
+		panel.webview.postMessage({ type: 'toolsLoading' });
+		tc.clearCache();
+		const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+		await tc.checkAll(cwd);
+		const statuses = tc.snapshotStatuses();
+		const tools = TOOL_DEFINITIONS.map((def, i) => ({
+			id: def.id,
+			label: def.label,
+			description: def.description,
+			available: statuses[i].available,
+			version: statuses[i].version,
+			toolPath: statuses[i].path,
+			error: statuses[i].error,
+		}));
+		panel.webview.postMessage({ type: 'tools', tools });
+	}
+
 	private static sendState(panel: vscode.WebviewPanel): void {
 		const cfg = vscode.workspace.getConfiguration('clash-toolkit');
 		const targetId = cfg.get<string>('synthesisTarget', 'generic');
-		const synthesisMode = cfg.get<string>('synthesisMode', 'per-module');
+		const outOfContext = cfg.get<boolean>('outOfContext', false);
 		const defaultScript = getDefaultScript(targetId);
 		const customScript = cfg.get<string>(`synthesisScript.${targetId}`, '') || '';
 		const diff: DiffLine[] = customScript
@@ -142,7 +177,7 @@ export class SynthesisSettingsPanel {
 		panel.webview.postMessage({
 			type: 'state',
 			targetId,
-			synthesisMode,
+			outOfContext,
 			targets,
 			defaultScript,
 			customScript,
@@ -351,11 +386,159 @@ export class SynthesisSettingsPanel {
     font-family: var(--vscode-editor-font-family, monospace);
     font-size: 11px;
   }
+
+  /* ── Tools section ── */
+  .section-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin: 24px 0 12px 0;
+  }
+  .section-header:first-of-type { margin-top: 0; }
+  .section-header h2 { margin: 0; }
+
+  .tools-list {
+    border: 1px solid var(--vscode-editorWidget-border, #444);
+    border-radius: var(--radius);
+  }
+  .tool-row {
+    display: grid;
+    grid-template-columns: 24px 1fr auto 24px;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--vscode-editorWidget-border, #444);
+  }
+  .tool-row:last-child { border-bottom: none; }
+  .tool-row:first-child .info-icon .info-tooltip {
+    bottom: auto;
+    top: calc(100% + 8px);
+  }
+
+  .tool-status {
+    font-size: 14px;
+    line-height: 1;
+    text-align: center;
+  }
+  .tool-status.ok { color: var(--vscode-testing-iconPassed, #4ec950); }
+  .tool-status.missing { color: var(--vscode-testing-iconFailed, #f14c4c); }
+  .tool-status.loading { color: var(--vscode-descriptionForeground); }
+
+  .tool-info {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+  }
+  .tool-name {
+    font-weight: 600;
+    font-size: 12px;
+  }
+  .tool-detail {
+    font-size: 11px;
+    color: var(--vscode-descriptionForeground);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .tool-path {
+    font-family: var(--vscode-editor-font-family, monospace);
+    font-size: 11px;
+    color: var(--vscode-descriptionForeground);
+    text-align: right;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: 360px;
+  }
+  .tool-path.missing-path {
+    color: var(--vscode-testing-iconFailed, #f14c4c);
+    font-style: italic;
+    font-family: var(--vscode-font-family);
+  }
+
+  .info-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    border: 1px solid var(--vscode-descriptionForeground);
+    color: var(--vscode-descriptionForeground);
+    font-size: 11px;
+    font-weight: 600;
+    cursor: help;
+    user-select: none;
+    position: relative;
+  }
+  .info-icon:hover {
+    border-color: var(--vscode-foreground);
+    color: var(--vscode-foreground);
+  }
+  .info-icon .info-tooltip {
+    visibility: hidden;
+    opacity: 0;
+    position: absolute;
+    bottom: calc(100% + 8px);
+    right: 0;
+    width: 300px;
+    padding: 8px 10px;
+    background: var(--vscode-editorHoverWidget-background, #252526);
+    color: var(--vscode-editorHoverWidget-foreground, #cccccc);
+    border: 1px solid var(--vscode-editorHoverWidget-border, #454545);
+    border-radius: var(--radius);
+    font-size: 11px;
+    font-weight: normal;
+    line-height: 1.5;
+    text-align: left;
+    white-space: normal;
+    pointer-events: none;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+    z-index: 100;
+    transition: opacity 0.15s ease, visibility 0s linear 0.15s;
+  }
+  .info-icon:hover .info-tooltip,
+  .info-icon:focus .info-tooltip {
+    visibility: visible;
+    opacity: 1;
+    transition: opacity 0.15s ease 0.1s, visibility 0s linear;
+  }
+
+  .btn-icon {
+    background: transparent;
+    border: 1px solid transparent;
+    color: var(--vscode-foreground);
+    padding: 2px 6px;
+    border-radius: var(--radius);
+    cursor: pointer;
+    font-size: 12px;
+  }
+  .btn-icon:hover {
+    background: var(--vscode-toolbar-hoverBackground, rgba(255,255,255,0.08));
+  }
+  .btn-icon.spinning { opacity: 0.5; pointer-events: none; }
 </style>
 </head>
 <body>
 
 <h1>Clash Synthesis Settings</h1>
+
+<!-- ═══════════════════════════════════════════════════════════════════════ -->
+<div class="section-header">
+  <h2>Tools</h2>
+  <button class="btn-icon" id="refresh-tools-btn" onclick="refreshTools()" title="Re-probe the toolchain">
+    &#x21bb; Refresh
+  </button>
+</div>
+<div class="tools-list" id="tools-list">
+  <div class="tool-row">
+    <div class="tool-status loading">…</div>
+    <div class="tool-info"><div class="tool-name">Probing toolchain…</div></div>
+    <div class="tool-path"></div>
+    <div></div>
+  </div>
+</div>
 
 <!-- ═══════════════════════════════════════════════════════════════════════ -->
 <h2>Elaboration</h2>
@@ -403,12 +586,15 @@ export class SynthesisSettingsPanel {
 </div>
 
 <div class="field">
-  <label for="synthesis-mode">Synthesis Mode</label>
-  <div class="description">How multi-component designs are synthesized.</div>
-  <select id="synthesis-mode">
-    <option value="per-module">Per-module (individual diagrams)</option>
-    <option value="whole-design">Whole-design (single netlist)</option>
-  </select>
+  <label>
+    <input type="checkbox" id="out-of-context" />
+    Out-of-context synthesis
+  </label>
+  <div class="description">
+    When enabled, multi-component designs are synthesized one module at a time
+    so each module gets its own utilization stats and circuit diagram.
+    When disabled, the whole design is synthesized as a single netlist.
+  </div>
 </div>
 
 <div class="field">
@@ -460,8 +646,8 @@ document.getElementById('target-select').addEventListener('change', function() {
   vscode.postMessage({ type: 'changeTarget', targetId: this.value });
 });
 
-document.getElementById('synthesis-mode').addEventListener('change', function() {
-  vscode.postMessage({ type: 'changeSynthesisMode', mode: this.value });
+document.getElementById('out-of-context').addEventListener('change', function() {
+  vscode.postMessage({ type: 'changeOutOfContext', outOfContext: this.checked });
 });
 
 // ── Script editing ──────────────────────────────────────────────────────
@@ -677,8 +863,90 @@ window.addEventListener('message', event => {
   const msg = event.data;
   if (msg.type === 'state') {
     renderState(msg);
+  } else if (msg.type === 'tools') {
+    renderTools(msg.tools);
+  } else if (msg.type === 'toolsLoading') {
+    setToolsLoading();
   }
 });
+
+// ── Tools section ───────────────────────────────────────────────────────
+
+function refreshTools() {
+  vscode.postMessage({ type: 'refreshTools' });
+}
+
+function setToolsLoading() {
+  const btn = document.getElementById('refresh-tools-btn');
+  btn.classList.add('spinning');
+  btn.disabled = true;
+}
+
+function renderTools(tools) {
+  const btn = document.getElementById('refresh-tools-btn');
+  btn.classList.remove('spinning');
+  btn.disabled = false;
+
+  const list = document.getElementById('tools-list');
+  list.innerHTML = '';
+  for (const tool of tools) {
+    const row = document.createElement('div');
+    row.className = 'tool-row';
+
+    const status = document.createElement('div');
+    status.className = 'tool-status ' + (tool.available ? 'ok' : 'missing');
+    status.textContent = tool.available ? '✓' : '✗';
+    status.setAttribute('aria-label', tool.available ? 'available' : 'missing');
+    row.appendChild(status);
+
+    const info = document.createElement('div');
+    info.className = 'tool-info';
+    const name = document.createElement('div');
+    name.className = 'tool-name';
+    name.textContent = tool.label;
+    info.appendChild(name);
+    if (tool.version) {
+      const detail = document.createElement('div');
+      detail.className = 'tool-detail';
+      detail.textContent = tool.version;
+      detail.title = tool.version;
+      info.appendChild(detail);
+    } else if (tool.error) {
+      const detail = document.createElement('div');
+      detail.className = 'tool-detail';
+      detail.textContent = tool.error;
+      detail.title = tool.error;
+      info.appendChild(detail);
+    }
+    row.appendChild(info);
+
+    const pathCell = document.createElement('div');
+    if (tool.toolPath) {
+      pathCell.className = 'tool-path';
+      pathCell.textContent = tool.toolPath;
+      pathCell.title = tool.toolPath;
+    } else {
+      pathCell.className = 'tool-path missing-path';
+      pathCell.textContent = 'not on PATH';
+    }
+    row.appendChild(pathCell);
+
+    const infoIcon = document.createElement('span');
+    infoIcon.className = 'info-icon';
+    infoIcon.tabIndex = 0;
+    infoIcon.setAttribute('aria-label', tool.label + ' info');
+    const iconGlyph = document.createElement('span');
+    iconGlyph.textContent = 'i';
+    infoIcon.appendChild(iconGlyph);
+    const tooltip = document.createElement('span');
+    tooltip.className = 'info-tooltip';
+    tooltip.textContent = tool.description;
+    infoIcon.appendChild(tooltip);
+    row.appendChild(infoIcon);
+
+    list.appendChild(row);
+  }
+}
 
 function renderState(msg) {
   // Populate target dropdown
@@ -695,8 +963,8 @@ function renderState(msg) {
   sel.value = msg.targetId;
   currentTargetId = msg.targetId;
 
-  // Synthesis mode
-  document.getElementById('synthesis-mode').value = msg.synthesisMode;
+  // Out-of-context checkbox
+  document.getElementById('out-of-context').checked = !!msg.outOfContext;
 
   // Script editor: show custom script if set, otherwise default
   currentDefault = msg.defaultScript;

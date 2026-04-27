@@ -29,33 +29,26 @@ with `--project-dir` and `--project-file` flags when a user cabal project is det
 
 ## Yosys Synthesis
 
-Three synthesis strategies are available:
+The runner exposes three flows, all sharing the same Yosys child-process plumbing:
 
-### Standard (`synthesize`)
+### Whole-design (`synthesize`)
 
-Generates a single Yosys TCL script that reads all Verilog files, elaborates the hierarchy, runs target-specific synthesis (`synth_ecp5`, `synth_ice40`, etc.), and writes outputs (synthesized Verilog, JSON for DigitalJS, statistics).
+Default for **Synthesize** and always used for **Place & Route**. Generates a single Yosys script that reads every Verilog file, elaborates the hierarchy, runs target-specific synthesis (`synth_ecp5`, `synth_ice40`, etc.), and writes outputs (synthesized Verilog, netlist JSON, statistics, diagram).
 
-### Parallel OOC (`synthesizeParallel`)
+### Per-module synthesis (`synthesizePerModule`)
 
-For multi-component designs (detected via `ClashManifestParser.buildDependencyGraph`):
+Used by **Synthesize** when `outOfContext` is enabled. Each component in the dependency graph is synthesized independently with its own directory under `per-module/<name>/`:
 
-1. Components are grouped into waves of mutually-independent modules
-2. Each wave is synthesized in parallel
-3. Sub-modules use generic `synth -top X` (no tech mapping) and produce JSON netlists
-4. The top module reads pre-synthesized dependency netlists and runs target-specific synthesis
-5. This avoids cell definition conflicts from tech-mapped sub-modules
+1. Dependencies' Verilog files are read (not synthesized) so `hierarchy -check` passes
+2. The component is flattened and tech-mapped standalone
+3. Each module produces `.il` (RTLIL), `.json` (netlist), `.svg` (diagram), and per-module statistics
 
-### Per-Module (`synthesizePerModule`)
+### Per-module elaboration (`elaboratePerModule`)
 
-Each component is synthesized independently with its dependencies' Verilog loaded for hierarchy resolution:
-
-1. Each component gets its own directory under `per-module/`
-2. Dependencies' Verilog files are read (not synthesized) so `hierarchy -check` passes
-3. Each module produces `.il` (RTLIL) and `.json` (DigitalJS) outputs
-4. Individual circuit diagrams can be viewed for any module
+Always used by **Elaborate**. Same per-module loop as `synthesizePerModule`, but the script body is `proc + opt_clean` (no flatten, no tech mapping). The `show` command is invoked with the component's name as an explicit selector so the diagram renders only that component's gates — sub-component instances appear as boxes rather than being expanded.
 
 ## nextpnr Place & Route
 
-`NextpnrRunner.placeAndRoute()` builds command-line arguments for the selected FPGA family and device, runs nextpnr, parses timing and utilization from stdout, and optionally runs ecppack for ECP5 bitstream generation.
+`NextpnrRunner.placeAndRoute()` builds command-line arguments for the selected FPGA family and device, runs nextpnr, and parses timing and utilization from stdout.
 
 SDC-derived frequency is passed via `--freq` when available.

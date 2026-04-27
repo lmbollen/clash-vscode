@@ -52,6 +52,10 @@
         {
           "id": "clash-toolkit.synthesisResults",
           "name": "Synthesis Results"
+        },
+        {
+          "id": "clash-toolkit.runHistory",
+          "name": "Run History"
         }
       ]
     },
@@ -85,11 +89,6 @@
         "title": "Clash: Check Toolchain"
       },
       {
-        "command": "clash-toolkit.openResultsPanel",
-        "title": "Clash: Open Synthesis Results Panel",
-        "icon": "$(open-preview)"
-      },
-      {
         "command": "clash-toolkit.refreshHaskellFunctions",
         "title": "Clash: Refresh Haskell Functions",
         "icon": "$(refresh)"
@@ -112,6 +111,30 @@
         "command": "clash-toolkit.openSettings",
         "title": "Clash: Open Settings",
         "icon": "$(gear)"
+      },
+      {
+        "command": "clash-toolkit.refreshRunHistory",
+        "title": "Clash: Refresh Run History",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "clash-toolkit.openHistoryVerilog",
+        "title": "Clash: Open Verilog (History)",
+        "icon": "$(file-code)"
+      },
+      {
+        "command": "clash-toolkit.openHistoryDiagram",
+        "title": "Clash: View Diagram (History)",
+        "icon": "$(open-preview)"
+      },
+      {
+        "command": "clash-toolkit.deleteRun",
+        "title": "Clash: Delete Run",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "clash-toolkit.selectRun",
+        "title": "Clash: Show Run in Synthesis Results"
       }
     ],
     "menus": {
@@ -147,13 +170,18 @@
           "group": "navigation@6"
         },
         {
-          "command": "clash-toolkit.openResultsPanel",
+          "command": "clash-toolkit.openSettings",
           "when": "view == clash-toolkit.synthesisResults",
           "group": "navigation@1"
         },
         {
+          "command": "clash-toolkit.refreshRunHistory",
+          "when": "view == clash-toolkit.runHistory",
+          "group": "navigation@1"
+        },
+        {
           "command": "clash-toolkit.openSettings",
-          "when": "view == clash-toolkit.synthesisResults",
+          "when": "view == clash-toolkit.runHistory",
           "group": "navigation@2"
         }
       ],
@@ -167,6 +195,21 @@
           "command": "clash-toolkit.viewModuleDiagram",
           "when": "view == clash-toolkit.synthesisResults && viewItem =~ /diagram/",
           "group": "inline@2"
+        },
+        {
+          "command": "clash-toolkit.openHistoryVerilog",
+          "when": "view == clash-toolkit.runHistory && viewItem =~ /verilog/",
+          "group": "inline@1"
+        },
+        {
+          "command": "clash-toolkit.openHistoryDiagram",
+          "when": "view == clash-toolkit.runHistory && viewItem =~ /diagram/",
+          "group": "inline@2"
+        },
+        {
+          "command": "clash-toolkit.deleteRun",
+          "when": "view == clash-toolkit.runHistory && viewItem == historyRun",
+          "group": "inline@3"
         }
       ]
     },
@@ -198,14 +241,10 @@
           "default": false,
           "description": "Show schematic visualization after Yosys synthesis"
         },
-        "clash-toolkit.synthesisMode": {
-          "type": "string",
-          "enum": [
-            "whole-design",
-            "per-module"
-          ],
-          "default": "per-module",
-          "description": "Synthesis mode: whole-design synthesizes everything at once; per-module synthesizes each component separately with individual diagrams"
+        "clash-toolkit.outOfContext": {
+          "type": "boolean",
+          "default": false,
+          "description": "Out-of-context synthesis: when enabled, multi-component designs are synthesized one module at a time so each gets its own utilization stats and circuit diagram. When disabled, the whole design is synthesized as a single netlist."
         },
         "clash-toolkit.pnrTargetFrequencyMHz": {
           "type": [
@@ -238,7 +277,6 @@
             "Lattice ECP5 (synth_ecp5)",
             "AMD / Xilinx 7-series (synth_xilinx)",
             "Gowin (synth_gowin)",
-            "Intel / Altera (synth_intel)",
             "QuickLogic (synth_quicklogic)",
             "Microsemi SmartFusion2 (synth_sf2)"
           ],
@@ -328,8 +366,6 @@
     "typescript": "^5.4.0"
   },
   "dependencies": {
-    "digitaljs": "^0.14.2",
-    "vscode-languageclient": "^9.0.1",
-    "yosys2digitaljs": "^0.10.3"
+    "vscode-languageclient": "^9.0.1"
   }
 }

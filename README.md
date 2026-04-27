@@ -5,7 +5,7 @@
 Synthesize Verilog from Haskell functions using [Clash](https://clash-lang.org/), explore the result with [Yosys](https://yosyshq.net/yosys/), and place-and-route for ECP5 FPGAs with [nextpnr](https://github.com/YosysHQ/nextpnr) — all from inside VS Code.
 
 ```
-Haskell source → Clash (Verilog) → Yosys (synthesis) → nextpnr (place & route) → bitstream
+Haskell source → Clash (Verilog) → Yosys (synthesis) → nextpnr (place & route)
 ```
 
 ## Quick Start

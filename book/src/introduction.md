@@ -7,7 +7,7 @@ Synthesize Verilog from Haskell functions using [Clash](https://clash-lang.org/)
 The extension integrates with **Haskell Language Server** (HLS) to find functions in your Clash project, determines which ones are monomorphic (and therefore synthesisable), then drives the full hardware workflow:
 
 ```
-Haskell source → Clash (Verilog) → Yosys (synthesis) → nextpnr (place & route) → bitstream
+Haskell source → Clash (Verilog) → Yosys (synthesis) → nextpnr (place & route)
 ```
 
 At every stage you can inspect output, view statistics, and open an interactive circuit diagram powered by DigitalJS.
@@ -16,7 +16,7 @@ At every stage you can inspect output, view statistics, and open an interactive 
 
 - **Function detection** via HLS — finds monomorphic functions automatically
 - **Code actions** — press `Ctrl+.` on a function to synthesize it directly
-- **Two synthesis modes** — whole-design (efficient) or per-module (individual diagrams)
+- **Optional out-of-context synthesis** — synthesize each module standalone for individual diagrams + utilization
 - **SDC frequency parsing** — reads Clash-generated `.sdc` files for target clock frequency
 - **Parallel OOC synthesis** — sub-modules synthesized in parallel waves
 - **Interactive circuit viewer** — DigitalJS-based pan/zoom schematic in a webview

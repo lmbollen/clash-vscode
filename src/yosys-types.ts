@@ -40,7 +40,10 @@ export interface YosysSynthesisResult {
 	
 	/** Path to JSON output for DigitalJS */
 	jsonPath?: string;
-	
+
+	/** Path to the rendered SVG diagram (Graphviz) */
+	svgPath?: string;
+
 	/** Synthesis statistics */
 	statistics?: SynthesisStatistics;
 	
@@ -71,6 +74,8 @@ export interface ModuleSynthesisResult {
 	rtlilPath?: string;
 	/** Path to JSON for DigitalJS visualization (per-module mode) */
 	diagramJsonPath?: string;
+	/** Path to the rendered SVG diagram (Graphviz) for this module */
+	svgPath?: string;
 	/** Clash-compiled Verilog source files for this module */
 	verilogFiles?: string[];
 	/** Synthesis time in milliseconds */

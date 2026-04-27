@@ -3,7 +3,7 @@
 The extension registers a code action provider for Haskell files. When your cursor is on a monomorphic function definition, pressing `Ctrl+.` (or clicking the lightbulb) offers:
 
 - **Clash: Synthesize 'funcName'** — runs Clash compilation + Yosys synthesis (no PnR)
-- **Clash: Synthesize + Place & Route 'funcName'** — full pipeline through to bitstream generation
+- **Clash: Synthesize + Place & Route 'funcName'** — full Clash + Yosys + nextpnr pipeline
 
 Code actions skip the function detection and picker dialogs — the function under the cursor is used directly. This provides a fast workflow for synthesizing specific functions without navigating the command palette.
 

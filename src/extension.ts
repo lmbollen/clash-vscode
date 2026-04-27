@@ -2,9 +2,10 @@ import * as vscode from 'vscode';
 import * as path from 'path';
 import { HLSClient } from './hls-client';
 import { FunctionDetector } from './function-detector';
-import { CodeGenerator, GenerationConfig } from './code-generator';
+import { CodeGenerator, GenerationConfig, ProjectDirectories } from './code-generator';
+import { promises as fsp } from 'fs';
 import { ClashCompiler, ClashCompilationResult } from './clash-compiler';
-import { YosysRunner } from './yosys-runner';
+import { YosysRunner, waitForSvg } from './yosys-runner';
 import { NextpnrRunner } from './nextpnr-runner';
 import { ECP5Device, ECP5Package, PNR_FAMILIES } from './nextpnr-types';
 import { FunctionInfo } from './types';
@@ -12,15 +13,68 @@ import { ClashManifestParser } from './clash-manifest-parser';
 import { ToolchainChecker } from './toolchain';
 import { initializeLogger, getLogger } from './file-logger';
 import { ClashCodeActionProvider } from './clash-code-actions';
-import { SynthesisResultsPanel } from './synthesis-results-panel';
 import { SynthesisSettingsPanel } from './synthesis-settings-panel';
 import { SynthesisResultsTreeProvider } from './synthesis-results-tree';
+import { RunHistoryTreeProvider, RunModuleNode, RunNode } from './run-history-tree';
+import { loadRun } from './run-loader';
 import { HaskellFunctionsTreeProvider, FunctionNode } from './haskell-functions-tree';
 import { getDefaultElaborationScript } from './synthesis-targets';
 
 // Output channel for logging
 let outputChannel: vscode.OutputChannel;
+
+/**
+ * Open a rendered SVG diagram in VS Code's built-in image preview editor.
+ * If `svgPath` is undefined (e.g. dot isn't installed), shows a helpful message
+ * instead of failing silently.
+ */
+async function openSvgPreview(svgPath?: string): Promise<void> {
+	if (!svgPath) {
+		vscode.window.showWarningMessage(
+			'No diagram rendered — install Graphviz (`dot`) to enable schematic output.'
+		);
+		return;
+	}
+	// `dot` is fire-and-forget during synthesis so it doesn't stall the
+	// pipeline; here is where we actually need the file, so wait for any
+	// in-flight conversion to finish.
+	const ready = await waitForSvg(svgPath);
+	if (!ready) {
+		vscode.window.showWarningMessage(
+			'Diagram not available — Graphviz `dot` may have failed. Check the output channel for details.'
+		);
+		return;
+	}
+	try {
+		await vscode.commands.executeCommand(
+			'vscode.openWith',
+			vscode.Uri.file(svgPath),
+			'imagePreview.previewEditor'
+		);
+	} catch {
+		// Fall back to plain open if the image preview editor isn't available.
+		await vscode.commands.executeCommand('vscode.open', vscode.Uri.file(svgPath));
+	}
+}
+/**
+ * Push a fresh set of results into the Synthesis Results view and label which
+ * run produced them.  Centralised so live runs and history selections agree on
+ * how the banner above the tree is formatted.
+ */
+function showSynthesisResults(
+	modules: import('./yosys-types').ModuleSynthesisResult[],
+	pnr: import('./nextpnr-types').NextpnrResult | undefined,
+	message: string,
+): void {
+	synthesisTreeProvider.refresh(modules, pnr);
+	if (synthesisResultsView) {
+		synthesisResultsView.message = message;
+	}
+}
+
 let synthesisTreeProvider: SynthesisResultsTreeProvider;
+let synthesisResultsView: vscode.TreeView<unknown>;
+let runHistoryTreeProvider: RunHistoryTreeProvider;
 let haskellFunctionsTreeProvider: HaskellFunctionsTreeProvider;
 let haskellFunctionsTreeView: vscode.TreeView<import('./haskell-functions-tree').FunctionTreeNode>;
 let hlsClient: HLSClient;
@@ -74,12 +128,25 @@ export function activate(context: vscode.ExtensionContext) {
 	nextpnrRunner = new NextpnrRunner(outputChannel);
 	toolchain = new ToolchainChecker(outputChannel);
 
-	// Register sidebar tree view for synthesis results
+	// Register sidebar tree view for synthesis results.
+	// createTreeView (instead of registerTreeDataProvider) gives us a `.message`
+	// banner that we use to label which run is currently being shown.
 	synthesisTreeProvider = new SynthesisResultsTreeProvider();
+	synthesisResultsView = vscode.window.createTreeView(
+		'clash-toolkit.synthesisResults',
+		{ treeDataProvider: synthesisTreeProvider }
+	);
+	context.subscriptions.push(synthesisResultsView);
+
+	// Register sidebar tree view for run history
+	runHistoryTreeProvider = new RunHistoryTreeProvider();
+	runHistoryTreeProvider.setWorkspaceRoot(
+		vscode.workspace.workspaceFolders?.[0]?.uri.fsPath
+	);
 	context.subscriptions.push(
 		vscode.window.registerTreeDataProvider(
-			'clash-toolkit.synthesisResults',
-			synthesisTreeProvider
+			'clash-toolkit.runHistory',
+			runHistoryTreeProvider
 		)
 	);
 
@@ -125,14 +192,7 @@ export function activate(context: vscode.ExtensionContext) {
 	// Command: open extension settings panel
 	context.subscriptions.push(
 		vscode.commands.registerCommand('clash-toolkit.openSettings', () => {
-			SynthesisSettingsPanel.show();
-		})
-	);
-
-	// Command: (re-)open the synthesis results panel from the sidebar
-	context.subscriptions.push(
-		vscode.commands.registerCommand('clash-toolkit.openResultsPanel', () => {
-			SynthesisResultsPanel.reopen();
+			SynthesisSettingsPanel.show(toolchain);
 		})
 	);
 
@@ -161,11 +221,86 @@ export function activate(context: vscode.ExtensionContext) {
 		})
 	);
 
-	// Command: open diagram viewer for a specific module (inline tree action)
+	// Command: open the rendered SVG diagram for a specific module
+	// (inline tree action). Falls back gracefully when dot isn't installed.
 	context.subscriptions.push(
 		vscode.commands.registerCommand('clash-toolkit.viewModuleDiagram', (item) => {
-			const moduleName: string | undefined = item?.result?.name;
-			SynthesisResultsPanel.reopen(moduleName);
+			openSvgPreview(item?.result?.svgPath);
+		})
+	);
+
+	// ── Run History commands ──────────────────────────────────────────────
+
+	// Command: refresh the run history tree
+	context.subscriptions.push(
+		vscode.commands.registerCommand('clash-toolkit.refreshRunHistory', () => {
+			runHistoryTreeProvider.refresh();
+		})
+	);
+
+	// Command: open Verilog from a history module node
+	context.subscriptions.push(
+		vscode.commands.registerCommand('clash-toolkit.openHistoryVerilog', async (item) => {
+			const files: string[] | undefined =
+				item instanceof RunModuleNode ? item.verilogFiles : undefined;
+			if (!files?.length) {
+				vscode.window.showInformationMessage('No Verilog files available for this module.');
+				return;
+			}
+			for (const f of files) {
+				const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(f));
+				await vscode.window.showTextDocument(doc, { preview: false });
+			}
+		})
+	);
+
+	// Command: open SVG diagram from a history module node
+	context.subscriptions.push(
+		vscode.commands.registerCommand('clash-toolkit.openHistoryDiagram', (item) => {
+			const svgPath: string | undefined =
+				item instanceof RunModuleNode ? item.svgPath : undefined;
+			openSvgPreview(svgPath);
+		})
+	);
+
+	// Command: load a previous run's results into the Synthesis Results view.
+	// Triggered by clicking a run in the Run History tree.
+	context.subscriptions.push(
+		vscode.commands.registerCommand('clash-toolkit.selectRun', async (item) => {
+			if (!(item instanceof RunNode)) { return; }
+			try {
+				const loaded = await loadRun(item.runRoot);
+				const cmd = loaded.meta?.command ?? 'run';
+				const ts = loaded.meta?.timestamp
+					? new Date(loaded.meta.timestamp).toLocaleString()
+					: item.runId;
+				const label = `${cmd} — ${item.qualifiedName} · ${ts}`;
+				showSynthesisResults(loaded.modules, loaded.pnr, label);
+			} catch (e) {
+				const msg = e instanceof Error ? e.message : String(e);
+				vscode.window.showErrorMessage(`Failed to load run: ${msg}`);
+			}
+		})
+	);
+
+	// Command: delete a run from history
+	context.subscriptions.push(
+		vscode.commands.registerCommand('clash-toolkit.deleteRun', async (item) => {
+			if (!item?.runRoot) { return; }
+			const answer = await vscode.window.showWarningMessage(
+				`Delete run ${item.runId}? This cannot be undone.`,
+				{ modal: true },
+				'Delete'
+			);
+			if (answer === 'Delete') {
+				try {
+					await fsp.rm(item.runRoot, { recursive: true, force: true });
+					runHistoryTreeProvider.refresh();
+				} catch (e) {
+					const msg = e instanceof Error ? e.message : String(e);
+					vscode.window.showErrorMessage(`Failed to delete run: ${msg}`);
+				}
+			}
 		})
 	);
 
@@ -203,15 +338,23 @@ export function activate(context: vscode.ExtensionContext) {
 	outputChannel.appendLine('Clash Toolkit activated');
 	outputChannel.appendLine('Make sure Haskell Language Server is running for full functionality');
 	
-	// Validate toolchain on activation (after a brief delay for direnv)
+	// Validate toolchain on activation (after a brief delay for direnv).
+	// Tracked as a disposable so deactivate() cancels it — otherwise the
+	// callback can fire after `outputChannel` is disposed (e.g. during test
+	// teardown) and surface as an uncaught "Channel has been closed".
 	if (workspaceFolders && workspaceFolders.length > 0) {
 		const cwd = workspaceFolders[0].uri.fsPath;
-		// Delay validation to give direnv time to activate
-		setTimeout(async () => {
+		let cancelled = false;
+		const handle = setTimeout(async () => {
+			if (cancelled) { return; }
 			await toolchain.checkAll(cwd);
+			if (cancelled) { return; }
 			outputChannel.appendLine('');
 			outputChannel.appendLine(toolchain.formatSummary());
 		}, 2000);
+		context.subscriptions.push({
+			dispose: () => { cancelled = true; clearTimeout(handle); }
+		});
 	}
 	
 	const logger = getLogger();
@@ -473,25 +616,36 @@ async function pickFunction(providedFunc?: FunctionInfo): Promise<FunctionInfo |
 }
 
 /**
- * Step 2 of the pipeline: synthesize with Yosys.
+ * Step 2 of the pipeline: synthesize or elaborate with Yosys.
  *
- * Always returns a non-empty `moduleResults` array — even for whole-design
- * synthesis where Yosys only produces a single top-level JSON — so the
- * diagram panel always has data to display.
+ * Always returns a non-empty `moduleResults` array — even when Yosys
+ * produces only a single top-level JSON — so the results view always has
+ * data to display.
+ *
+ * `flow === 'elaborate'` always runs per-module (each component preserves
+ * its hierarchy so its diagram shows sub-instances as boxes).
+ *
+ * `flow === 'synthesize'` honours `outOfContext`: when true, every
+ * component is synthesized standalone with its own diagram + utilization;
+ * when false, a single whole-design Yosys invocation runs.
  */
 async function runYosynsSynthesis(
 	compiled: CompilationOutput,
 	wsRoot: string,
-	synthesisMode: string,
+	flow: 'synthesize' | 'elaborate',
+	outOfContext: boolean,
 	targetFamily: string,
 	progress: ProgressReporter,
 	customScript?: string
 ): Promise<SynthesisOutput> {
 	const { compileResult, projectDirs, topModule, verilogInput } = compiled;
 
-	progress.report({ message: 'Synthesizing with Yosys…', increment: 40 });
-	outputChannel.appendLine('\n=== Step 3: Synthesizing with Yosys ===');
-	outputChannel.appendLine(`Mode: ${synthesisMode}`);
+	const stageLabel = flow === 'elaborate' ? 'Elaborating' : 'Synthesizing';
+	progress.report({ message: `${stageLabel} with Yosys…`, increment: 40 });
+	outputChannel.appendLine(`\n=== Step 3: ${stageLabel} with Yosys ===`);
+	if (flow === 'synthesize') {
+		outputChannel.appendLine(`Mode: ${outOfContext ? 'out-of-context (per-module)' : 'whole-design'}`);
+	}
 	outputChannel.appendLine(`Target: ${targetFamily}`);
 
 	let synthResult: import('./yosys-types').YosysSynthesisResult;
@@ -502,15 +656,16 @@ async function runYosynsSynthesis(
 		customScript: customScript || undefined
 	} as import('./yosys-types').YosysOptions;
 
-	if (synthesisMode === 'whole-design') {
-		// Whole-design: single Yosys invocation with all files
-		synthResult = await yosysRunner.synthesize(yosysOpts);
-	} else if (compileResult.manifest) {
+	const perModuleFlow = flow === 'elaborate' || outOfContext;
+
+	if (perModuleFlow && compileResult.manifest) {
 		const manifestParser = new ClashManifestParser();
 		const components = await manifestParser.buildDependencyGraph(compileResult.manifest.manifestPath);
 
 		if (components.length > 1) {
-			synthResult = await yosysRunner.synthesizePerModule(components, yosysOpts);
+			synthResult = flow === 'elaborate'
+				? await yosysRunner.elaboratePerModule(components, yosysOpts)
+				: await yosysRunner.synthesizePerModule(components, yosysOpts);
 		} else {
 			synthResult = await yosysRunner.synthesize(yosysOpts);
 		}
@@ -523,9 +678,9 @@ async function runYosynsSynthesis(
 			outputChannel.appendLine('Errors:');
 			synthResult.errors.forEach(e => outputChannel.appendLine(`  ${e.message}`));
 		}
-		throw new Error('Yosys synthesis failed — check the output channel for details');
+		throw new Error(`Yosys ${flow === 'elaborate' ? 'elaboration' : 'synthesis'} failed — check the output channel for details`);
 	}
-	outputChannel.appendLine('✓ Synthesis complete');
+	outputChannel.appendLine(`✓ ${flow === 'elaborate' ? 'Elaboration' : 'Synthesis'} complete`);
 
 	if (synthResult.statistics) {
 		outputChannel.appendLine(`  Cells: ${synthResult.statistics.cellCount ?? 'N/A'}`);
@@ -548,6 +703,7 @@ async function runYosynsSynthesis(
 			name: topModule,
 			success: synthResult.success,
 			diagramJsonPath: synthResult.jsonPath,
+			svgPath: synthResult.svgPath,
 			verilogFiles: Array.isArray(verilogInput) ? verilogInput : [verilogInput],
 			elapsedMs: 0,
 			statistics: synthResult.statistics,
@@ -569,10 +725,14 @@ async function runYosynsSynthesis(
 async function runCompile(
 	func: FunctionInfo,
 	wsRoot: string,
-	progress: ProgressReporter
+	progress: ProgressReporter,
+	runId?: string
 ): Promise<CompilationOutput> {
-	const projectDirs = CodeGenerator.getProjectDirectories(wsRoot, func);
+	const projectDirs = CodeGenerator.getProjectDirectories(wsRoot, func, runId);
 	const genConfig: GenerationConfig = { keepFiles: true, modulePrefix: 'ClashSynth_' };
+
+	outputChannel.appendLine(`\nRun: ${projectDirs.runId}`);
+	outputChannel.appendLine(`Run directory: ${projectDirs.runRoot}`);
 
 	progress.report({ message: 'Generating Clash wrapper…', increment: 10 });
 	outputChannel.appendLine('\n=== Step 1: Generating Clash Wrapper ===');
@@ -610,19 +770,53 @@ async function runCompile(
 }
 
 /**
+ * Write a small `run.json` file in the run root summarising what was done.
+ * Lets a future history view list past runs with their command/target/outcome
+ * without having to re-parse Yosys/nextpnr logs. Failure is non-fatal.
+ */
+async function writeRunMetadata(
+	projectDirs: ProjectDirectories,
+	func: FunctionInfo,
+	command: 'elaborate' | 'synthesize' | 'place-and-route' | 'generate-verilog',
+	extra: Record<string, unknown> = {},
+): Promise<void> {
+	try {
+		await fsp.mkdir(projectDirs.runRoot, { recursive: true });
+		const qualifiedName = func.moduleName ? `${func.moduleName}.${func.name}` : func.name;
+		const meta = {
+			runId: projectDirs.runId,
+			command,
+			function: qualifiedName,
+			functionFile: func.filePath,
+			timestamp: new Date().toISOString(),
+			...extra,
+		};
+		await fsp.writeFile(
+			path.join(projectDirs.runRoot, 'run.json'),
+			JSON.stringify(meta, null, 2),
+			'utf8',
+		);
+		runHistoryTreeProvider?.refresh();
+	} catch {
+		/* non-fatal */
+	}
+}
+
+/**
  * Run the full Clash → Yosys pipeline.  Always re-runs both stages — see
  * runCompile for why we don't memoize at the extension level.
  */
 async function runPipeline(
 	func: FunctionInfo,
 	wsRoot: string,
-	synthesisMode: string,
+	flow: 'synthesize' | 'elaborate',
+	outOfContext: boolean,
 	targetFamily: string,
 	progress: ProgressReporter,
 	customScript?: string
 ): Promise<{ compiled: CompilationOutput; synthesis: SynthesisOutput }> {
 	const compiled = await runCompile(func, wsRoot, progress);
-	const synthesis = await runYosynsSynthesis(compiled, wsRoot, synthesisMode, targetFamily, progress, customScript);
+	const synthesis = await runYosynsSynthesis(compiled, wsRoot, flow, outOfContext, targetFamily, progress, customScript);
 	return { compiled, synthesis };
 }
 
@@ -650,8 +844,13 @@ async function synthesizeFunctionCommand(providedFunc?: FunctionInfo) {
 			title: `Compiling ${func.name} to Verilog`,
 			cancellable: false
 		}, async (progress) => {
-			const { compileResult } = await runCompile(func, wsRoot, progress);
+			const { compileResult, projectDirs } = await runCompile(func, wsRoot, progress);
 			progress.report({ message: 'Done', increment: 100 });
+
+			await writeRunMetadata(projectDirs, func, 'generate-verilog', {
+				success: compileResult.success,
+				topModule: compileResult.manifest?.top_component?.name,
+			});
 
 			outputChannel.appendLine('');
 			outputChannel.appendLine('='.repeat(60));
@@ -707,16 +906,18 @@ async function elaborateCommand(providedFunc?: FunctionInfo) {
 			// Elaboration uses its own script template — user-overridable via the
 			// `elaborationScript` setting.  The target dropdown is irrelevant at
 			// this stage (no tech mapping), so we pass 'generic' and ignore it.
+			// The custom script is only consulted for single-component designs;
+			// multi-component elaborations run per-module via `elaboratePerModule`,
+			// which uses its own internal script.
 			const userScript = cfg.get<string>('elaborationScript', '') || undefined;
 			const customScript = userScript ?? getDefaultElaborationScript();
 
-			// Elaboration is always whole-design — per-module splitting only
-			// makes sense after synthesis has produced distinct netlists.
-			const { synthesis: { synthResult, moduleResults } } =
+			const { synthesis: { synthResult, moduleResults, projectDirs } } =
 				await runPipeline(
 					func, wsRoot,
-					'whole-design',
 					'elaborate',
+					true,
+					'generic',
 					progress,
 					customScript
 				);
@@ -734,8 +935,17 @@ async function elaborateCommand(providedFunc?: FunctionInfo) {
 				}
 			}
 
-			synthesisTreeProvider.refresh(moduleResults);
-			SynthesisResultsPanel.store(moduleResults, `Elaboration — ${func.name}`, outputChannel);
+			const elabLabel = `Elaboration — ${func.name}`;
+			showSynthesisResults(moduleResults, undefined, elabLabel);
+
+			await writeRunMetadata(projectDirs, func, 'elaborate', {
+				success: synthResult.success,
+				cellCount: synthResult.statistics?.cellCount,
+				wireCount: synthResult.statistics?.wireCount,
+				logicDepth: synthResult.statistics?.logicDepth,
+			});
+
+			await openSvgPreview(synthResult.svgPath);
 
 			vscode.window.showInformationMessage(
 				`Elaboration complete — ${func.name}. Cells: ${synthResult.statistics?.cellCount ?? 'N/A'}`
@@ -776,10 +986,12 @@ async function synthesizeCommand(providedFunc?: FunctionInfo) {
 		}, async (progress) => {
 			const targetFamily = cfg.get<string>('synthesisTarget', 'generic');
 			const customScript = cfg.get<string>(`synthesisScript.${targetFamily}`, '') || undefined;
-			const { synthesis: { synthResult, moduleResults, sdcFrequencyMHz } } =
+			const outOfContext = cfg.get<boolean>('outOfContext', false);
+			const { synthesis: { synthResult, moduleResults, sdcFrequencyMHz, projectDirs } } =
 				await runPipeline(
 					func, wsRoot,
-					cfg.get<string>('synthesisMode', 'per-module'),
+					'synthesize',
+					outOfContext,
 					targetFamily, progress,
 					customScript
 				);
@@ -802,8 +1014,21 @@ async function synthesizeCommand(providedFunc?: FunctionInfo) {
 				}
 			}
 
-			synthesisTreeProvider.refresh(moduleResults);
-			SynthesisResultsPanel.store(moduleResults, `Synthesis Results — ${func.name}`, outputChannel);
+			const synthLabel = `Synthesis — ${func.name}`;
+			showSynthesisResults(moduleResults, undefined, synthLabel);
+
+			await writeRunMetadata(projectDirs, func, 'synthesize', {
+				target: targetFamily,
+				outOfContext,
+				success: synthResult.success,
+				cellCount: synthResult.statistics?.cellCount,
+				wireCount: synthResult.statistics?.wireCount,
+				logicDepth: synthResult.statistics?.logicDepth,
+				sdcFrequencyMHz,
+				moduleCount: moduleResults.length,
+			});
+
+			await openSvgPreview(synthResult.svgPath);
 
 			vscode.window.showInformationMessage(
 				`Synthesis complete — ${func.name}. Cells: ${synthResult.statistics?.cellCount ?? 'N/A'}`
@@ -870,16 +1095,16 @@ async function placeAndRouteCommand(providedFunc?: FunctionInfo) {
 		await vscode.window.withProgress({
 			location: vscode.ProgressLocation.Notification,
 			title: `Implementing ${func.name} on ${synthTarget.toUpperCase()}`,
-			cancellable: false
-		}, async (progress) => {
+			cancellable: true
+		}, async (progress, token) => {
 			// Steps 1–3: Clash + Yosys pipeline.
 			// PnR always uses whole-design synthesis (nextpnr needs a merged netlist).
 			const customScript = cfg.get<string>(`synthesisScript.${synthTarget}`, '') || undefined;
 			const { synthesis: { synthResult, moduleResults, topModule, sdcFrequencyMHz, projectDirs } } =
-				await runPipeline(func, wsRoot, 'whole-design', synthTarget, progress, customScript);
+				await runPipeline(func, wsRoot, 'synthesize', false, synthTarget, progress, customScript);
 
-			synthesisTreeProvider.refresh(moduleResults);
-			SynthesisResultsPanel.store(moduleResults, `Synthesis Results — ${func.name}`, outputChannel);
+			const pnrInProgressLabel = `Synthesis — ${func.name} (P&R running…)`;
+			showSynthesisResults(moduleResults, undefined, pnrInProgressLabel);
 
 			// Step 4: Place & Route
 			if (!synthResult.jsonPath) {
@@ -888,6 +1113,12 @@ async function placeAndRouteCommand(providedFunc?: FunctionInfo) {
 
 			progress.report({ message: `Place and Route with ${familyInfo.binary}…`, increment: 60 });
 			outputChannel.appendLine(`\n=== Step 4: Place & Route with ${familyInfo.binary} ===`);
+
+			// Bridge VS Code's cancellation token into a standard AbortController
+			// the nextpnr runner can listen on. Cancellation kills the child
+			// process so the progress notification doesn't get stuck waiting.
+			const abortController = new AbortController();
+			const cancelSub = token.onCancellationRequested(() => abortController.abort());
 
 			// Build family-specific options.
 			//
@@ -910,9 +1141,10 @@ async function placeAndRouteCommand(providedFunc?: FunctionInfo) {
 				packageName: packageChoice?.value,
 				vopt: selectedDevice.vopt ? [selectedDevice.vopt] : undefined,
 				routedSvg: cfg.get<boolean>('pnrWriteRoutedSvg', true),
+				abortSignal: abortController.signal,
+				progressUpdate: (msg) => progress.report({ message: msg }),
 			};
 
-			// For ECP5, also fill the legacy ecp5 field so ecppack runs
 			if (familyInfo.family === 'ecp5') {
 				// 5G parts (um5g-*) only support speed grade 8
 				const is5G = selectedDevice.value.startsWith('um5g');
@@ -923,16 +1155,43 @@ async function placeAndRouteCommand(providedFunc?: FunctionInfo) {
 				};
 			}
 
-			const pnrResult = await nextpnrRunner.placeAndRoute(pnrOpts);
+			let pnrResult: import('./nextpnr-types').NextpnrResult;
+			try {
+				pnrResult = await nextpnrRunner.placeAndRoute(pnrOpts);
+			} finally {
+				cancelSub.dispose();
+			}
+
+			if (token.isCancellationRequested) {
+				throw new Error('Place and route cancelled');
+			}
 
 			if (!pnrResult.success) {
-				throw new Error('Place and route failed — check output channel for details');
+				// Surface the actual reason on the toast and pop the output
+				// channel so the user sees what nextpnr complained about.
+				outputChannel.show(true);
+				const headline = pnrResult.errors[0]?.message?.trim();
+				const detail = headline && headline.length > 0
+					? headline
+					: 'nextpnr did not produce a placed design';
+				throw new Error(`Place and route failed: ${detail}`);
 			}
 
 			// Refresh the sidebar with both synth module results and the PNR
 			// timing / utilization / critical-path data so users see everything
 			// in the tree instead of having to scroll the output channel.
-			synthesisTreeProvider.refresh(moduleResults, pnrResult);
+			showSynthesisResults(moduleResults, pnrResult, `Place & Route — ${func.name}`);
+
+			await writeRunMetadata(projectDirs, func, 'place-and-route', {
+				target: synthTarget,
+				device: deviceChoice.value,
+				deviceLabel: deviceChoice.label,
+				packageName: packageChoice?.value,
+				success: pnrResult.success,
+				cellCount: synthResult.statistics?.cellCount,
+				maxFrequencyMHz: pnrResult.timing?.maxFrequency,
+				constraintsMet: pnrResult.timing?.constraintsMet,
+			});
 
 			progress.report({ message: 'Done', increment: 100 });
 			outputChannel.appendLine('');
@@ -940,9 +1199,6 @@ async function placeAndRouteCommand(providedFunc?: FunctionInfo) {
 			outputChannel.appendLine('✓ FPGA Implementation Complete!');
 			outputChannel.appendLine('='.repeat(60));
 			outputChannel.appendLine(`  Config:    ${pnrResult.textcfgPath}`);
-			if (pnrResult.bitstreamPath) {
-				outputChannel.appendLine(`  Bitstream: ${pnrResult.bitstreamPath}`);
-			}
 			if (pnrResult.reportJsonPath) {
 				outputChannel.appendLine(`  Report:    ${pnrResult.reportJsonPath}`);
 			}
@@ -987,10 +1243,10 @@ async function placeAndRouteCommand(providedFunc?: FunctionInfo) {
 			}
 
 			const action = await vscode.window.showInformationMessage(
-				`✓ FPGA implementation complete! Bitstream: ${path.basename(pnrResult.bitstreamPath || '')}`,
-				'Open Bitstream Folder'
+				'✓ Place & Route complete!',
+				'Open PnR Folder'
 			);
-			if (action === 'Open Bitstream Folder') {
+			if (action === 'Open PnR Folder') {
 				await vscode.commands.executeCommand('revealFileInOS', vscode.Uri.file(projectDirs.nextpnr));
 			}
 		});

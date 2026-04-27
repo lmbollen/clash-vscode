@@ -63,7 +63,6 @@ export class NextpnrRunner {
 
 		// Determine output paths
 		const textcfgPath = path.join(options.outputDir, `${options.topModule}.config`);
-		const bitstreamPath = path.join(options.outputDir, `${options.topModule}.bit`);
 		const reportJsonPath = path.join(options.outputDir, 'report.json');
 		const routedSvgPath = options.routedSvg
 			? path.join(options.outputDir, `${options.topModule}.routed.svg`)
@@ -84,26 +83,6 @@ export class NextpnrRunner {
 			reportJsonPath,
 			routedSvgPath,
 		});
-
-		if (!nextpnrResult.success) {
-			return nextpnrResult;
-		}
-
-		// For ECP5, run ecppack to generate bitstream
-		if (options.family === 'ecp5') {
-			this.outputChannel.appendLine('\n=== Generating Bitstream with ecppack ===');
-			const ecppackResult = await this.runEcppack(textcfgPath, bitstreamPath);
-
-			if (ecppackResult.success) {
-				nextpnrResult.bitstreamPath = bitstreamPath;
-				this.outputChannel.appendLine(`✓ Bitstream generated: ${bitstreamPath}`);
-			} else {
-				this.outputChannel.appendLine(`✗ Bitstream generation failed`);
-				nextpnrResult.warnings.push({
-					message: 'ecppack failed to generate bitstream'
-				});
-			}
-		}
 
 		return nextpnrResult;
 	}
@@ -319,9 +298,12 @@ export class NextpnrRunner {
 	}
 
 	/**
-	 * Execute nextpnr
+	 * Execute nextpnr.
+	 *
+	 * @internal — public so regression tests can drive it with a fake binary.
+	 * Not part of the extension's public API.
 	 */
-	private async runNextpnr(
+	async runNextpnr(
 		executable: string,
 		args: string[],
 		options: NextpnrOptions,
@@ -331,37 +313,87 @@ export class NextpnrRunner {
 		return new Promise((resolve) => {
 			let stdout = '';
 			let stderr = '';
+			let resolved = false;
+			let cancelled = false;
 			const warnings: NextpnrWarning[] = [];
 			const errors: NextpnrError[] = [];
+
+			const finalize = (result: NextpnrResult) => {
+				if (resolved) { return; }
+				resolved = true;
+				options.abortSignal?.removeEventListener('abort', onAbort);
+				resolve(result);
+			};
 
 			const logger = getLogger();
 			const finishLog = logger?.command(executable, args);
 			const nextpnr = spawn(executable, args);
 
-			nextpnr.stdout.on('data', (data) => {
-				const text = data.toString();
-				stdout += text;
-				this.outputChannel.append(text);
-			});
+			const onAbort = () => {
+				cancelled = true;
+				this.outputChannel.appendLine('\n⏹  Cancellation requested — stopping nextpnr…');
+				try { nextpnr.kill('SIGTERM'); } catch { /* already exited */ }
+				// Hard kill if it doesn't honour SIGTERM quickly
+				setTimeout(() => {
+					try { nextpnr.kill('SIGKILL'); } catch { /* gone */ }
+				}, 3000);
+			};
+			if (options.abortSignal) {
+				if (options.abortSignal.aborted) { onAbort(); }
+				else { options.abortSignal.addEventListener('abort', onAbort); }
+			}
 
-			nextpnr.stderr.on('data', (data) => {
-				const text = data.toString();
-				stderr += text;
-				this.outputChannel.append(text);
+			// Last few lines tracked so we can echo them in the failure error.
+			const recentLines: string[] = [];
+			const pushLine = (line: string) => {
+				const trimmed = line.trim();
+				if (!trimmed) { return; }
+				recentLines.push(trimmed);
+				if (recentLines.length > 8) { recentLines.shift(); }
+			};
 
-				// Parse warnings and errors
-				if (text.toLowerCase().includes('warning')) {
-					warnings.push({ message: text.trim() });
+			// Heuristic progress phases: nextpnr prints these as it advances.
+			const progressPatterns: Array<[RegExp, string]> = [
+				[/packing/i, 'Packing design'],
+				[/placing/i, 'Placing'],
+				[/place_constraints/i, 'Placing constraints'],
+				[/heap_placer|heap placement|sa placement|Run #\d+/i, 'Placement search'],
+				[/routing/i, 'Routing'],
+				[/Critical path/i, 'Timing analysis'],
+				[/writing.*config|generated.*\.config/i, 'Writing config'],
+			];
+			const reportProgress = (line: string) => {
+				if (!options.progressUpdate) { return; }
+				for (const [re, label] of progressPatterns) {
+					if (re.test(line)) {
+						options.progressUpdate(label);
+						return;
+					}
 				}
-				if (text.toLowerCase().includes('error')) {
-					errors.push({ message: text.trim() });
+			};
+
+			const handleStream = (text: string, isStderr: boolean) => {
+				this.outputChannel.append(text);
+				for (const line of text.split(/\r?\n/)) {
+					pushLine(line);
+					reportProgress(line);
+					const lower = line.toLowerCase();
+					if (lower.includes('warning')) { warnings.push({ message: line.trim() }); }
+					if (lower.includes('error') || lower.startsWith('fatal')) {
+						errors.push({ message: line.trim() });
+					}
 				}
-			});
+				if (isStderr) { stderr += text; } else { stdout += text; }
+			};
+
+			nextpnr.stdout.on('data', (data) => handleStream(data.toString(), false));
+			nextpnr.stderr.on('data', (data) => handleStream(data.toString(), true));
 
 			nextpnr.on('error', (error) => {
 				this.outputChannel.appendLine(`\nERROR: Failed to spawn ${executable}: ${error.message}`);
 				this.outputChannel.appendLine('Make sure nextpnr is installed and in your PATH');
-				resolve({
+				finishLog?.then(fn => fn(null));
+				finalize({
 					success: false,
 					output: stdout + stderr,
 					warnings,
@@ -369,12 +401,16 @@ export class NextpnrRunner {
 				});
 			});
 
-			nextpnr.on('close', async (code) => {
+			// Use 'close' so stdout/stderr have fully drained before we parse
+			// timing/utilization or check for written report files. ('exit'
+			// fires earlier and would give us truncated output.)
+			const handleTermination = async (code: number | null, signal: NodeJS.Signals | null) => {
 				finishLog?.then(fn => fn(code));
 				this.outputChannel.appendLine('');
-				this.outputChannel.appendLine(`nextpnr exited with code ${code}`);
+				this.outputChannel.appendLine(
+					`nextpnr ${signal ? `terminated by ${signal}` : `exited with code ${code}`}`
+				);
 
-				// Save complete log to file
 				const logPath = path.join(options.outputDir, 'nextpnr.log');
 				const fullOutput = stdout + stderr;
 				try {
@@ -382,6 +418,16 @@ export class NextpnrRunner {
 					this.outputChannel.appendLine(`Log saved: ${logPath}`);
 				} catch (err) {
 					this.outputChannel.appendLine(`Warning: Could not save log file: ${err}`);
+				}
+
+				if (cancelled) {
+					finalize({
+						success: false,
+						output: fullOutput,
+						warnings,
+						errors: [{ message: 'Cancelled by user' }]
+					});
+					return;
 				}
 
 				if (code === 0) {
@@ -466,7 +512,6 @@ export class NextpnrRunner {
 							await fs.writeFile(utilPath, utilReport, 'utf8');
 							this.outputChannel.appendLine(`Utilization report saved: ${utilPath}`);
 						}
-						// Create combined summary report
 						if (timing || utilization) {
 							const summaryReport = this.formatSummaryReport(timing, utilization, options.topModule);
 							const summaryPath = path.join(options.outputDir, 'summary.txt');
@@ -478,14 +523,12 @@ export class NextpnrRunner {
 					}
 
 					const textcfgPath = path.join(options.outputDir, `${options.topModule}.config`);
-
-					// Expose the report path only if nextpnr actually wrote it.
 					const reportExists = await fs.access(reportJsonPath).then(() => true, () => false);
 					const svgExists = routedSvgPath
 						? await fs.access(routedSvgPath).then(() => true, () => false)
 						: false;
 
-					resolve({
+					finalize({
 						success: true,
 						textcfgPath,
 						output: fullOutput,
@@ -499,59 +542,26 @@ export class NextpnrRunner {
 					});
 				} else {
 					this.outputChannel.appendLine(`✗ Place and route failed with code ${code}`);
-					resolve({
+					// Promote the most useful failure line so the caller can
+					// surface it without forcing the user to scroll the log.
+					const headlineError = errors.find(e => /\b(error|fatal)\b/i.test(e.message))
+						?? (recentLines.length > 0 ? { message: recentLines[recentLines.length - 1] } : undefined);
+					const finalErrors: NextpnrError[] = headlineError
+						? [headlineError, ...errors.filter(e => e !== headlineError)]
+						: errors;
+					if (finalErrors.length === 0) {
+						finalErrors.push({ message: `nextpnr exited with code ${code}` });
+					}
+					finalize({
 						success: false,
 						output: fullOutput,
 						warnings,
-						errors
+						errors: finalErrors
 					});
 				}
-			});
-		});
-	}
+			};
 
-	/**
-	 * Run ecppack to generate bitstream from textcfg
-	 */
-	private async runEcppack(textcfgPath: string, bitstreamPath: string): Promise<{ success: boolean }> {
-		return new Promise((resolve) => {
-			const args = [textcfgPath, bitstreamPath];
-			const logger = getLogger();
-			const finishLog = logger?.command('ecppack', args);
-			const ecppack = spawn('ecppack', args);
-
-			let output = '';
-
-			ecppack.stdout.on('data', (data) => {
-				const text = data.toString();
-				output += text;
-				this.outputChannel.append(text);
-			});
-
-			ecppack.stderr.on('data', (data) => {
-				const text = data.toString();
-				output += text;
-				this.outputChannel.append(text);
-			});
-
-			ecppack.on('error', (error) => {
-				this.outputChannel.appendLine(`\nERROR: Failed to spawn ecppack: ${error.message}`);
-				resolve({ success: false });
-			});
-
-			ecppack.on('close', async (code) => {
-				finishLog?.then(fn => fn(code));
-				// Save ecppack log
-				const logPath = path.join(path.dirname(bitstreamPath), 'ecppack.log');
-				try {
-					await fs.writeFile(logPath, output, 'utf8');
-					this.outputChannel.appendLine(`\necppack log saved: ${logPath}`);
-				} catch (err) {
-					this.outputChannel.appendLine(`Warning: Could not save ecppack log: ${err}`);
-				}
-				
-				resolve({ success: code === 0 });
-			});
+			nextpnr.on('close', handleTermination);
 		});
 	}
 

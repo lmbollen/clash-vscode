@@ -50,13 +50,16 @@ tee -q -o {outputDir}/logic_depth.txt ltp -noff
 # Write synthesized Verilog
 write_verilog -noattr {outputDir}/{outputBaseName}_synth.v
 
-# Prepare design for DigitalJS
+# Strip timing-only cells before further export
 delete */t:$specify2 */t:$specify3
 opt_clean
 clean
 
-# Write JSON for DigitalJS
+# Write JSON netlist (for downstream tools)
 write_json {outputDir}/{outputBaseName}.json
+
+# Render diagram via Graphviz (dot is invoked separately by the extension)
+show -format dot -prefix {outputDir}/{outputBaseName} -viewer none -notitle
 `;
 }
 
@@ -90,13 +93,16 @@ tee -q -o {outputDir}/logic_depth.txt ltp -noff
 # Write synthesized Verilog
 write_verilog -noattr {outputDir}/{outputBaseName}_synth.v
 
-# Prepare design for DigitalJS
+# Strip timing-only cells before further export
 delete */t:$specify2 */t:$specify3
 opt_clean
 clean
 
-# Write JSON for DigitalJS
+# Write JSON netlist (for downstream tools)
 write_json {outputDir}/{outputBaseName}.json
+
+# Render diagram via Graphviz (dot is invoked separately by the extension)
+show -format dot -prefix {outputDir}/{outputBaseName} -viewer none -notitle
 `;
 
 const ELABORATION_SCRIPT = `# Read design files
@@ -118,11 +124,13 @@ tee -q -o {outputDir}/stats.json stat -json
 # Report longest topological path (combinational depth)
 tee -q -o {outputDir}/logic_depth.txt ltp -noff
 
-# Prepare design for DigitalJS
 clean
 
-# Write JSON for DigitalJS
+# Write JSON netlist (for downstream tools)
 write_json {outputDir}/{outputBaseName}.json
+
+# Render diagram via Graphviz (dot is invoked separately by the extension)
+show -format dot -prefix {outputDir}/{outputBaseName} -viewer none -notitle
 `;
 
 // ---------------------------------------------------------------------------
@@ -159,12 +167,6 @@ const targetList: SynthesisTarget[] = [
 		label: 'Gowin',
 		synthCommand: 'synth_gowin',
 		defaultScript: makeTargetScript('synth_gowin -top {topModule}'),
-	},
-	{
-		id: 'intel',
-		label: 'Intel / Altera',
-		synthCommand: 'synth_intel',
-		defaultScript: makeTargetScript('synth_intel -top {topModule}'),
 	},
 	{
 		id: 'quicklogic',

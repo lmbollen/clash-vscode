@@ -210,7 +210,6 @@ suite('PnR Targets: end-to-end synthesis + place & route', () => {
 				vopt: buildVopt(devOption, familyInfo.family),
 			};
 
-			// For ECP5 also fill the legacy ecp5 field so ecppack runs
 			if (familyInfo.family === 'ecp5' && pkg) {
 				const is5G = device.startsWith('um5g');
 				pnrOpts.ecp5 = {
@@ -263,61 +262,6 @@ suite('PnR Targets: end-to-end synthesis + place & route', () => {
 			}
 		});
 
-		// ── Verify bitstream (ECP5 only) ────────────────────────────────
-
-		if (targetId === 'ecp5') {
-			test(`${suiteLabel}: ecppack produces bitstream`, async function () {
-				this.timeout(60_000);
-
-				if (!(await binaryExists('yosys'))) { this.skip(); return; }
-				if (!(await binaryExists('nextpnr-ecp5'))) { this.skip(); return; }
-				if (!(await binaryExists('ecppack'))) { this.skip(); return; }
-
-				const pnrDir = path.join(tmpDir, `${targetId}-pnr`);
-				const bitstreamPath = path.join(pnrDir, 'pnr_test_top.bit');
-
-				try {
-					const stat = await fs.stat(bitstreamPath);
-					assert.ok(stat.size > 0, 'Bitstream should be non-empty');
-				} catch {
-					this.skip();
-				}
-			});
-		}
-
-		if (targetId === 'ice40') {
-			test(`${suiteLabel}: icepack produces bitstream`, async function () {
-				this.timeout(60_000);
-
-				if (!(await binaryExists('yosys'))) { this.skip(); return; }
-				if (!(await binaryExists('nextpnr-ice40'))) { this.skip(); return; }
-				if (!(await binaryExists('icepack'))) { this.skip(); return; }
-
-				// icepack is not run automatically by placeAndRoute — run it manually
-				const pnrDir = path.join(tmpDir, `${targetId}-pnr`);
-				const configPath = path.join(pnrDir, 'pnr_test_top.config');
-				const bitstreamPath = path.join(pnrDir, 'pnr_test_top.bin');
-
-				try {
-					await fs.access(configPath);
-				} catch {
-					this.skip();
-					return;
-				}
-
-				await new Promise<void>((resolve, reject) => {
-					const proc = spawn('icepack', [configPath, bitstreamPath], { timeout: 30_000 });
-					proc.on('error', reject);
-					proc.on('close', code => {
-						if (code === 0) { resolve(); }
-						else { reject(new Error(`icepack exited with code ${code}`)); }
-					});
-				});
-
-				const stat = await fs.stat(bitstreamPath);
-				assert.ok(stat.size > 0, 'Bitstream should be non-empty');
-			});
-		}
 	}
 
 	// -------------------------------------------------------------------

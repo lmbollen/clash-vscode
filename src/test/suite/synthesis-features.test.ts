@@ -11,7 +11,7 @@ import { YosysRunner } from '../../yosys-runner';
 /**
  * Tests for the three-stage pipeline:
  * - elaborate / synthesize / placeAndRoute command registration
- * - synthesisMode + elaborationScript configuration settings
+ * - outOfContext + elaborationScript configuration settings
  * - ModuleSynthesisResult per-module fields (incl. logic depth)
  */
 suite('Synthesis Features', () => {
@@ -77,22 +77,20 @@ suite('Synthesis Features', () => {
 	});
 
 	// ---------------------------------------------------------------
-	// Configuration: synthesisMode
+	// Configuration: outOfContext
 	// ---------------------------------------------------------------
 
-	test('synthesisMode config defaults to per-module', () => {
+	test('outOfContext config defaults to false', () => {
 		const config = vscode.workspace.getConfiguration('clash-toolkit');
-		const mode = config.get<string>('synthesisMode');
-		assert.strictEqual(mode, 'per-module');
+		const ooc = config.get<boolean>('outOfContext');
+		assert.strictEqual(ooc, false);
 	});
 
-	test('synthesisMode config schema default is per-module', async () => {
+	test('outOfContext config schema default is false', async () => {
 		const config = vscode.workspace.getConfiguration('clash-toolkit');
-		// Inspect the config — in extension host tests the schema is loaded
-		// from package.json so we just verify the setting is readable
-		const mode = config.inspect<string>('synthesisMode');
-		assert.ok(mode, 'synthesisMode should be inspectable');
-		assert.strictEqual(mode!.defaultValue, 'per-module');
+		const ooc = config.inspect<boolean>('outOfContext');
+		assert.ok(ooc, 'outOfContext should be inspectable');
+		assert.strictEqual(ooc!.defaultValue, false);
 	});
 
 	// ---------------------------------------------------------------

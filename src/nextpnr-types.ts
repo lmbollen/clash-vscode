@@ -46,8 +46,6 @@ export interface PnrFamilyInfo {
 	family: NextpnrFamily;
 	/** nextpnr binary name */
 	binary: string;
-	/** Bitstream tool run after nextpnr (if any) */
-	packTool?: string;
 	/** Devices the user can pick from. */
 	devices: DeviceOption[];
 	/** How the device value is passed to nextpnr (`--<value>` for ECP5, `--<flag> <value>` for others). */
@@ -62,7 +60,6 @@ export const PNR_FAMILIES: ReadonlyMap<string, PnrFamilyInfo> = new Map([
 	['ecp5', {
 		family: 'ecp5' as NextpnrFamily,
 		binary: 'nextpnr-ecp5',
-		packTool: 'ecppack',
 		deviceFlag: 'prefix' as const,
 		devices: [
 			{ label: 'LFE5U-25F',    value: '25k',      description: '25k LUTs' },
@@ -79,7 +76,6 @@ export const PNR_FAMILIES: ReadonlyMap<string, PnrFamilyInfo> = new Map([
 	['ice40', {
 		family: 'ice40' as NextpnrFamily,
 		binary: 'nextpnr-ice40',
-		packTool: 'icepack',
 		deviceFlag: 'prefix' as const,
 		devices: [
 			{ label: 'iCE40 LP384',   value: 'lp384',   description: '384 LCs' },
@@ -179,6 +175,20 @@ export interface NextpnrOptions {
 	 * Additional nextpnr arguments
 	 */
 	extraArgs?: string[];
+
+	/**
+	 * Optional callback receiving short progress messages parsed from
+	 * nextpnr's output. Used to surface the current stage in the VS Code
+	 * progress notification so the user knows things are still moving.
+	 */
+	progressUpdate?: (message: string) => void;
+
+	/**
+	 * Optional abort signal. When triggered, the runner sends SIGTERM to
+	 * nextpnr, then resolves with `success: false` and an
+	 * error noting the cancellation.
+	 */
+	abortSignal?: AbortSignal;
 }
 
 /**
@@ -226,11 +236,6 @@ export interface NextpnrResult {
 	 * Path to generated textual config (if successful)
 	 */
 	textcfgPath?: string;
-
-	/**
-	 * Path to generated bitstream (if ecppack ran)
-	 */
-	bitstreamPath?: string;
 
 	/**
 	 * Path to the JSON report written by nextpnr's --report flag

@@ -15,8 +15,8 @@ import { getDefaultElaborationScript } from '../../synthesis-targets';
  * End-to-end integration tests that run the full synthesis and PnR flow
  * on the test-project workspace.
  *
- * These tests require that cabal, clash-ghc, yosys, nextpnr-ecp5, and
- * ecppack are all available in the environment.
+ * These tests require that cabal, clash-ghc, yosys, and nextpnr-ecp5
+ * are all available in the environment.
  */
 suite('Integration: Full Synthesis + PnR Flow', () => {
 	let outputChannel: vscode.OutputChannel;
@@ -422,23 +422,5 @@ suite('Integration: Full Synthesis + PnR Flow', () => {
 				'LUT count should be non-negative'
 			);
 		}
-	});
-
-	// ---------------------------------------------------------------
-	// Step 6: Generate bitstream with ecppack
-	// ---------------------------------------------------------------
-
-	test('Step 6: Bitstream should exist (ecppack)', async function () {
-		this.timeout(60_000);
-
-		assert.ok(yosysJsonPath, 'Step 4 must have produced a JSON netlist path');
-
-		// ecppack is run by nextpnrRunner.placeAndRoute automatically for ecp5.
-		// Just verify the bitstream file was created.
-		const projectDirs = CodeGenerator.getProjectDirectories(wsRoot, testFunc);
-		const bitstreamPath = path.join(projectDirs.nextpnr, `${topModule}.bit`);
-
-		const stat = await fs.stat(bitstreamPath);
-		assert.ok(stat.size > 0, 'Bitstream file should be non-empty');
 	});
 });

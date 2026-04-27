@@ -1,6 +1,89 @@
 import * as vscode from 'vscode';
+import * as path from 'path';
+import { promises as fs, constants as fsConstants } from 'fs';
 import { spawn } from 'child_process';
 import { getLogger } from './file-logger';
+
+/**
+ * Walk PATH to resolve the absolute location of a command.
+ * Cross-platform: honours PATHEXT on Windows. Returns undefined if not found.
+ */
+async function resolveCommandPath(cmd: string): Promise<string | undefined> {
+    const PATH = process.env.PATH || '';
+    const exts = process.platform === 'win32'
+        ? (process.env.PATHEXT || '').split(';').filter(Boolean)
+        : [''];
+    for (const dir of PATH.split(path.delimiter)) {
+        if (!dir) { continue; }
+        for (const ext of exts) {
+            const candidate = path.join(dir, cmd + ext);
+            try {
+                await fs.access(candidate, fsConstants.X_OK);
+                return candidate;
+            } catch { /* not executable here, keep looking */ }
+        }
+    }
+    return undefined;
+}
+
+/**
+ * The set of external tools the extension can use, with human-readable
+ * descriptions for the settings panel info tooltips.
+ */
+export interface ToolDefinition {
+    /** Internal id used as the cache key. */
+    id: string;
+    /** Tool name shown to the user. */
+    label: string;
+    /** Default executable name (overridable via settings for some tools). */
+    defaultCommand: string;
+    /** Flag used to probe for availability. */
+    versionFlag: string;
+    /** Why the extension needs this tool — shown in the info tooltip. */
+    description: string;
+}
+
+export const TOOL_DEFINITIONS: readonly ToolDefinition[] = [
+    {
+        id: 'cabal',
+        label: 'cabal',
+        defaultCommand: 'cabal',
+        versionFlag: '--version',
+        description:
+            'Cabal builds the Clash project and invokes the Clash compiler to '
+            + 'generate Verilog from your Haskell sources. Required for every '
+            + 'synthesis run.',
+    },
+    {
+        id: 'yosys',
+        label: 'yosys',
+        defaultCommand: 'yosys',
+        versionFlag: '-V',
+        description:
+            'Yosys is the open-source RTL synthesis suite that elaborates the '
+            + 'Verilog and produces a gate-level netlist. Required for the '
+            + 'Elaborate, Synthesize, and Place & Route commands.',
+    },
+    {
+        id: 'dot',
+        label: 'dot (Graphviz)',
+        defaultCommand: 'dot',
+        versionFlag: '-V',
+        description:
+            'Graphviz `dot` renders the schematic SVG diagrams that Yosys '
+            + 'emits via its `show` command. Without it, synthesis still '
+            + 'succeeds but no diagram is produced.',
+    },
+    {
+        id: 'nextpnr-ecp5',
+        label: 'nextpnr-ecp5',
+        defaultCommand: 'nextpnr-ecp5',
+        versionFlag: '--version',
+        description:
+            'nextpnr-ecp5 places and routes the synthesized netlist onto the '
+            + 'Lattice ECP5 fabric. Required for the Place & Route command.',
+    },
+];
 
 /**
  * Represents the availability status of a single tool
@@ -76,16 +159,18 @@ export class ToolchainChecker {
                 proc.stdout.on('data', (d) => { stdout += d.toString(); });
                 proc.stderr.on('data', (d) => { stderr += d.toString(); });
 
-                proc.on('close', (code) => {
+                proc.on('close', async (code) => {
                     finishLog?.then(fn => fn(code));
                     const output = (stdout + stderr).trim();
                     const firstLine = output.split('\n')[0] || '';
 
                     if (code === 0 || output.length > 0) {
+                        const resolvedPath = await resolveCommandPath(cmd);
                         resolve({
                             name,
                             available: true,
                             version: firstLine,
+                            path: resolvedPath,
                         });
                     } else {
                         resolve({
@@ -121,15 +206,27 @@ export class ToolchainChecker {
         const config = vscode.workspace.getConfiguration('clash-toolkit');
         const yosysCmd = config.get<string>('yosysCommand', 'yosys');
 
-        const checks = [
-            this.check('cabal', 'cabal', '--version', cwd),
-            this.check('yosys', yosysCmd, '-V', cwd),
-            this.check('nextpnr-ecp5', 'nextpnr-ecp5', '--version', cwd),
-            this.check('ecppack', 'ecppack', '--help', cwd),
-        ];
+        const checks = TOOL_DEFINITIONS.map(def => {
+            const command = def.id === 'yosys' ? yosysCmd : def.defaultCommand;
+            return this.check(def.id, command, def.versionFlag, cwd);
+        });
 
         await Promise.all(checks);
         return new Map(this.cache);
+    }
+
+    /**
+     * Snapshot the current cached statuses, ordered to match TOOL_DEFINITIONS.
+     * Tools that have not been probed yet are returned with `available: false`.
+     */
+    snapshotStatuses(): ToolStatus[] {
+        return TOOL_DEFINITIONS.map(def =>
+            this.cache.get(def.id) ?? {
+                name: def.id,
+                available: false,
+                error: 'not yet probed',
+            }
+        );
     }
 
     /**

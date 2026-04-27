@@ -10,7 +10,6 @@ The project uses [Nix](https://nixos.org/) to provide a reproducible development
 - **Haskell Language Server** (HLS)
 - **Yosys** for logic synthesis
 - **nextpnr** for place & route (ice40, ecp5, …)
-- **Project Trellis** (ecppack) for ECP5 bitstream packing
 
 Enter the shell:
 

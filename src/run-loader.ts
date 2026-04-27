@@ -1,0 +1,247 @@
+import * as path from 'path';
+import { promises as fs } from 'fs';
+import { ModuleSynthesisResult, SynthesisStatistics } from './yosys-types';
+import { NextpnrResult } from './nextpnr-types';
+import { NextpnrRunner } from './nextpnr-runner';
+import { YosysRunner } from './yosys-runner';
+
+/**
+ * Persisted summary written into each run's `run.json`.  Mirrored here (instead
+ * of imported) so the loader stays decoupled from the tree-view module that
+ * originally defined it.
+ */
+export interface RunMetadata {
+    runId: string;
+    command: string;
+    function: string;
+    functionFile: string;
+    timestamp: string;
+    success?: boolean;
+    target?: string;
+    mode?: string;
+    cellCount?: number;
+    wireCount?: number;
+    logicDepth?: number;
+    moduleCount?: number;
+    maxFrequencyMHz?: number;
+    device?: string;
+    deviceLabel?: string;
+    packageName?: string;
+    sdcFrequencyMHz?: number;
+    constraintsMet?: boolean;
+    topModule?: string;
+}
+
+export interface LoadedRun {
+    modules: ModuleSynthesisResult[];
+    pnr?: NextpnrResult;
+    topModule?: string;
+    meta?: RunMetadata;
+}
+
+export async function readRunMeta(runRoot: string): Promise<RunMetadata | undefined> {
+    try {
+        const raw = await fs.readFile(path.join(runRoot, 'run.json'), 'utf8');
+        return JSON.parse(raw) as RunMetadata;
+    } catch {
+        return undefined;
+    }
+}
+
+async function exists(p: string): Promise<boolean> {
+    try { await fs.access(p); return true; } catch { return false; }
+}
+
+async function loadStatsIfExists(dir: string): Promise<SynthesisStatistics | undefined> {
+    try {
+        const raw = await fs.readFile(path.join(dir, 'stats.json'), 'utf8');
+        return YosysRunner.parseStatsJson(raw);
+    } catch {
+        return undefined;
+    }
+}
+
+async function findVerilogFor(dir: string, moduleName: string): Promise<string[]> {
+    try {
+        const all = await fs.readdir(dir);
+        const matching = all.filter(f =>
+            (f === `${moduleName}.v` || f === `${moduleName}.sv` || f.startsWith(`${moduleName}_`)) &&
+            (f.endsWith('.v') || f.endsWith('.sv'))
+        );
+        if (matching.length > 0) {
+            return matching.map(f => path.join(dir, f));
+        }
+        return all
+            .filter(f => f.endsWith('.v') || f.endsWith('.sv'))
+            .map(f => path.join(dir, f));
+    } catch {
+        return [];
+    }
+}
+
+async function findAllVerilog(dir: string): Promise<string[]> {
+    const out: string[] = [];
+    try {
+        const dirents = await fs.readdir(dir, { withFileTypes: true });
+        for (const d of dirents) {
+            const full = path.join(dir, d.name);
+            if (d.isDirectory()) {
+                out.push(...await findAllVerilog(full));
+            } else if (d.name.endsWith('.v') || d.name.endsWith('.sv')) {
+                out.push(full);
+            }
+        }
+    } catch { /* dir absent */ }
+    return out;
+}
+
+async function loadModuleFromDir(
+    moduleName: string,
+    moduleDir: string,
+    verilogDir: string,
+): Promise<ModuleSynthesisResult> {
+    const stats = await loadStatsIfExists(moduleDir);
+
+    const svgCandidates = [
+        path.join(moduleDir, `${moduleName}.svg`),
+        path.join(moduleDir, `${moduleName}.dot.svg`),
+    ];
+    let svgPath: string | undefined;
+    for (const c of svgCandidates) {
+        if (await exists(c)) { svgPath = c; break; }
+    }
+
+    const jsonCandidates = [
+        path.join(moduleDir, `${moduleName}_diagram.json`),
+        path.join(moduleDir, `${moduleName}.json`),
+    ];
+    let diagramJsonPath: string | undefined;
+    for (const c of jsonCandidates) {
+        if (await exists(c)) { diagramJsonPath = c; break; }
+    }
+
+    const verilogFiles = await findVerilogFor(verilogDir, moduleName);
+
+    return {
+        name: moduleName,
+        success: true,
+        svgPath,
+        diagramJsonPath,
+        verilogFiles,
+        elapsedMs: 0,
+        statistics: stats,
+        errors: [],
+    };
+}
+
+/**
+ * Reconstruct ModuleSynthesisResult[] from a run directory on disk.
+ *
+ * Handles both layouts produced by the runner:
+ *   - per-module: `03-yosys/per-module/<moduleName>/...`
+ *   - whole-design: a single set of files directly under `03-yosys/`.
+ */
+export async function loadRunModules(
+    runRoot: string,
+    meta?: RunMetadata,
+): Promise<{ modules: ModuleSynthesisResult[]; topModule?: string }> {
+    const yosysDir = path.join(runRoot, '03-yosys');
+    const verilogDir = path.join(runRoot, '02-verilog');
+
+    // Per-module mode
+    const perModuleDir = path.join(yosysDir, 'per-module');
+    let perModuleEntries: string[] = [];
+    try {
+        const dirents = await fs.readdir(perModuleDir, { withFileTypes: true });
+        perModuleEntries = dirents.filter(d => d.isDirectory()).map(d => d.name).sort();
+    } catch { /* not per-module mode */ }
+
+    if (perModuleEntries.length > 0) {
+        const modules: ModuleSynthesisResult[] = [];
+        for (const name of perModuleEntries) {
+            modules.push(await loadModuleFromDir(name, path.join(perModuleDir, name), verilogDir));
+        }
+        return { modules, topModule: meta?.topModule };
+    }
+
+    // Whole-design mode — single module
+    let yosysFiles: string[] = [];
+    try { yosysFiles = await fs.readdir(yosysDir); } catch { return { modules: [] }; }
+
+    let topModule = meta?.topModule;
+    if (!topModule) {
+        const svg = yosysFiles.find(f => f.endsWith('.svg'));
+        if (svg) { topModule = path.basename(svg, '.svg').replace(/\.dot$/, ''); }
+    }
+    if (!topModule) {
+        topModule = meta?.function?.split('.').pop() ?? 'design';
+    }
+
+    const stats = await loadStatsIfExists(yosysDir);
+
+    let svgPath: string | undefined;
+    for (const c of [
+        path.join(yosysDir, `${topModule}.svg`),
+        path.join(yosysDir, `${topModule}.dot.svg`),
+    ]) {
+        if (await exists(c)) { svgPath = c; break; }
+    }
+    if (!svgPath) {
+        const svg = yosysFiles.find(f => f.endsWith('.svg'));
+        if (svg) { svgPath = path.join(yosysDir, svg); }
+    }
+
+    let diagramJsonPath: string | undefined;
+    const jsonCandidate = path.join(yosysDir, `${topModule}.json`);
+    if (await exists(jsonCandidate)) { diagramJsonPath = jsonCandidate; }
+
+    const verilogFiles = await findAllVerilog(verilogDir);
+
+    const modules: ModuleSynthesisResult[] = [];
+    if (stats || svgPath || verilogFiles.length > 0) {
+        modules.push({
+            name: topModule,
+            success: meta?.success !== false,
+            svgPath,
+            diagramJsonPath,
+            verilogFiles,
+            elapsedMs: 0,
+            statistics: stats,
+            errors: [],
+        });
+    }
+    return { modules, topModule };
+}
+
+/**
+ * Reconstruct nextpnr timing/utilization/critical-path data from
+ * `04-nextpnr/report.json`. Returns undefined when no report exists.
+ */
+export async function loadRunPnr(runRoot: string, meta?: RunMetadata): Promise<NextpnrResult | undefined> {
+    const reportPath = path.join(runRoot, '04-nextpnr', 'report.json');
+    const report = await NextpnrRunner.loadReportJson(reportPath);
+    if (!report) { return undefined; }
+
+    const family = meta?.target ?? 'generic';
+    const timing = NextpnrRunner.timingFromReport(report);
+    const utilization = NextpnrRunner.utilizationFromReport(report, family);
+    const criticalPaths = NextpnrRunner.criticalPathsFromReport(report);
+
+    return {
+        success: meta?.success !== false,
+        timing,
+        utilization,
+        criticalPaths,
+        output: '',
+        warnings: [],
+        errors: [],
+        reportJsonPath: reportPath,
+    };
+}
+
+export async function loadRun(runRoot: string): Promise<LoadedRun> {
+    const meta = await readRunMeta(runRoot);
+    const { modules, topModule } = await loadRunModules(runRoot, meta);
+    const pnr = await loadRunPnr(runRoot, meta);
+    return { modules, pnr, topModule, meta };
+}

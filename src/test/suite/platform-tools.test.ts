@@ -9,7 +9,7 @@ import { ComponentInfo } from '../../clash-manifest-types';
 /**
  * Tests for platform tool support.
  *
- * Covers Yosys synthesis targets, nextpnr FPGA families, and ecppack.
+ * Covers Yosys synthesis targets and nextpnr FPGA families.
  */
 suite('Platform Tools Test Suite', () => {
 	let outputChannel: vscode.OutputChannel;
@@ -70,11 +70,6 @@ suite('Platform Tools Test Suite', () => {
 	test('Yosys: getSynthCommand returns synth_gowin for gowin', () => {
 		const cmd = YosysRunner.getSynthCommand('gowin', 'top');
 		assert.strictEqual(cmd, 'synth_gowin -top top');
-	});
-
-	test('Yosys: getSynthCommand returns synth_intel for intel', () => {
-		const cmd = YosysRunner.getSynthCommand('intel', 'top');
-		assert.strictEqual(cmd, 'synth_intel -top top');
 	});
 
 	test('Yosys: getSynthCommand returns synth_quicklogic for quicklogic', () => {
@@ -524,17 +519,6 @@ suite('Platform Tools Test Suite', () => {
 	}
 
 	// ---------------------------------------------------------------
-	// Ecppack: tool availability
-	// ---------------------------------------------------------------
-
-	test('Ecppack: should probe with --help flag', async function () {
-		this.timeout(15000);
-		const status = await checker.check('ecppack', 'ecppack', '--help');
-		assert.strictEqual(status.name, 'ecppack');
-		assert.strictEqual(typeof status.available, 'boolean');
-	});
-
-	// ---------------------------------------------------------------
 	// Cabal: tool availability (needed by synth project)
 	// ---------------------------------------------------------------
 
@@ -549,13 +533,13 @@ suite('Platform Tools Test Suite', () => {
 	// checkAll: all tools in a single call
 	// ---------------------------------------------------------------
 
-	test('checkAll should check cabal, yosys, nextpnr-ecp5, ecppack', async function () {
+	test('checkAll should check cabal, yosys, dot, nextpnr-ecp5', async function () {
 		this.timeout(30000);
 		const results = await checker.checkAll();
 		assert.ok(results.has('cabal'), 'Should check cabal');
 		assert.ok(results.has('yosys'), 'Should check yosys');
+		assert.ok(results.has('dot'), 'Should check dot');
 		assert.ok(results.has('nextpnr-ecp5'), 'Should check nextpnr-ecp5');
-		assert.ok(results.has('ecppack'), 'Should check ecppack');
 		assert.strictEqual(results.size, 4, 'Should check exactly 4 tools');
 	});
 
@@ -569,8 +553,8 @@ suite('Platform Tools Test Suite', () => {
 		const summary = checker.formatSummary();
 		assert.ok(summary.includes('cabal'), 'Summary should mention cabal');
 		assert.ok(summary.includes('yosys'), 'Summary should mention yosys');
+		assert.ok(summary.includes('dot'), 'Summary should mention dot');
 		assert.ok(summary.includes('nextpnr-ecp5'), 'Summary should mention nextpnr-ecp5');
-		assert.ok(summary.includes('ecppack'), 'Summary should mention ecppack');
 	});
 
 	// ---------------------------------------------------------------
