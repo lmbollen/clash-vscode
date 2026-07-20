@@ -3,7 +3,7 @@ import Mocha from 'mocha';
 import { glob } from 'glob';
 import * as vscode from 'vscode';
 
-const EXTENSION_ID = 'lmbollen.clash-toolkit';
+const EXTENSION_ID = 'LucasBollen.clash-toolkit';
 
 export async function run(): Promise<void> {
 	// The extension's only activation event is `onLanguage:haskell`, which the
