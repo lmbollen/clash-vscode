@@ -34,6 +34,12 @@ scripts/**
 .vscode-test/**
 .direnv/
 
+# Trim bundled runtime deps: ship JS only, not their sourcemaps/typedefs
+node_modules/**/*.map
+node_modules/**/*.d.ts
+node_modules/**/*.d.ts.map
+node_modules/.bin/**
+
 # Repo metadata not needed at runtime
 .gitignore
 .editorconfig

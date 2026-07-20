@@ -3,12 +3,23 @@ import * as path from 'path';
 import { promises as fs, constants as fsConstants } from 'fs';
 import { spawn } from 'child_process';
 import { getLogger } from './file-logger';
+import { getToolProvider, resolveTool, toolSpawnEnv } from './tool-provider';
 
 /**
  * Walk PATH to resolve the absolute location of a command.
  * Cross-platform: honours PATHEXT on Windows. Returns undefined if not found.
  */
 async function resolveCommandPath(cmd: string): Promise<string | undefined> {
+    // An already-resolved absolute/relative path (e.g. a managed binary) needs
+    // no PATH walk — report it directly if it's executable.
+    if (cmd.includes('/') || cmd.includes(path.sep)) {
+        try {
+            await fs.access(cmd, fsConstants.X_OK);
+            return cmd;
+        } catch {
+            return undefined;
+        }
+    }
     const PATH = process.env.PATH || '';
     const exts = process.platform === 'win32'
         ? (process.env.PATHEXT || '').split(';').filter(Boolean)
@@ -156,11 +167,15 @@ export class ToolchainChecker {
     ): Promise<ToolStatus> {
         return new Promise((resolve) => {
             const parts = splitCommand(command);
-            const cmd = parts[0];
+            // Resolve the executable token through the managed toolchain so a
+            // probe reflects the same binary synthesis will actually spawn
+            // (managed copy when the user has none on PATH).
+            const cmd = resolveTool(parts[0]);
             const baseArgs = parts.slice(1);
             const args = [...baseArgs, versionFlag];
 
-            const spawnOpts: { timeout: number; cwd?: string } = { timeout: 10_000 };
+            const spawnOpts: { timeout: number; cwd?: string; env: NodeJS.ProcessEnv } =
+                { timeout: 10_000, env: toolSpawnEnv(cmd) };
             if (cwd) {
                 spawnOpts.cwd = cwd;
             }
@@ -270,31 +285,54 @@ export class ToolchainChecker {
         versionFlag = '--version',
         cwd?: string
     ): Promise<boolean> {
-        const status = await this.check(name, command, versionFlag, cwd);
-        if (!status.available) {
-            const settingHint = name === 'yosys'
-                    ? 'clash-toolkit.yosysCommand'
-                    : undefined;
+        let status = await this.check(name, command, versionFlag, cwd);
+        if (status.available) { return true; }
 
-            let msg = `${name} is not available: ${status.error}.`;
-            if (settingHint) {
-                msg += ` Configure it in Settings → "${settingHint}".`;
+        // The command isn't available. If the managed toolchain can supply it,
+        // show the per-tool selection prompt and, on success, re-probe so the
+        // run proceeds.
+        const provider = getToolProvider();
+        const baseCommand = splitCommand(command)[0] || name;
+        if (provider?.canProvide(baseCommand)) {
+            this.outputChannel.appendLine(
+                `✗ ${name} is not available: ${status.error}. Offering managed install…`
+            );
+            const satisfied = await provider.promptToolSelection(baseCommand);
+            if (satisfied) {
+                provider.clearAvailabilityCache();
+                // Drop the cached "unavailable" verdict so we re-probe the
+                // freshly installed managed binary.
+                this.cache.delete(name);
+                status = await this.check(name, command, versionFlag, cwd);
+                if (status.available) { return true; }
             } else {
-                msg += ` Make sure ${name} is installed and in your PATH.`;
+                // User cancelled, left this tool unchecked, or the install
+                // failed. promptToolSelection()/install() surfaced the reason.
+                return false;
             }
-
-            this.outputChannel.appendLine(`✗ ${msg}`);
-            vscode.window.showErrorMessage(msg, 'Open Settings').then((choice) => {
-                if (choice === 'Open Settings') {
-                    vscode.commands.executeCommand(
-                        'workbench.action.openSettings',
-                        settingHint || 'clash-toolkit'
-                    );
-                }
-            });
-            return false;
         }
-        return true;
+
+        const settingHint = name === 'yosys'
+                ? 'clash-toolkit.yosysCommand'
+                : undefined;
+
+        let msg = `${name} is not available: ${status.error}.`;
+        if (settingHint) {
+            msg += ` Configure it in Settings → "${settingHint}".`;
+        } else {
+            msg += ` Make sure ${name} is installed and in your PATH.`;
+        }
+
+        this.outputChannel.appendLine(`✗ ${msg}`);
+        vscode.window.showErrorMessage(msg, 'Open Settings').then((choice) => {
+            if (choice === 'Open Settings') {
+                vscode.commands.executeCommand(
+                    'workbench.action.openSettings',
+                    settingHint || 'clash-toolkit'
+                );
+            }
+        });
+        return false;
     }
 
     /**

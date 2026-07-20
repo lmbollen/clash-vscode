@@ -14,6 +14,7 @@ import {
 	PNR_FAMILIES
 } from './nextpnr-types';
 import { getLogger } from './file-logger';
+import { resolveTool, toolSpawnEnv } from './tool-provider';
 
 /**
  * Shape of the JSON produced by nextpnr's `--report` flag.
@@ -168,9 +169,10 @@ export class NextpnrRunner {
 		try {
 			const probes = candidates.map(pkg =>
 				new Promise<{ pkg: string; ok: boolean }>(resolve => {
-					const proc = spawn(binary, [
+					const resolvedBinary = resolveTool(binary);
+					const proc = spawn(resolvedBinary, [
 						...deviceArgs, '--package', pkg, '--json', probeJson,
-					], { timeout: 5000 });
+					], { timeout: 5000, env: toolSpawnEnv(resolvedBinary) });
 
 					let combined = '';
 					proc.stdout.on('data', (d) => { combined += d.toString(); });
@@ -328,8 +330,9 @@ export class NextpnrRunner {
 			};
 
 			const logger = getLogger();
-			const finishLog = logger?.command(executable, args);
-			const nextpnr = spawn(executable, args);
+			const resolvedExecutable = resolveTool(executable);
+			const finishLog = logger?.command(resolvedExecutable, args);
+			const nextpnr = spawn(resolvedExecutable, args, { env: toolSpawnEnv(resolvedExecutable) });
 
 			const onAbort = () => {
 				cancelled = true;

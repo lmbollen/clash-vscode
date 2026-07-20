@@ -11,6 +11,7 @@ import { ECP5Device, ECP5Package, PNR_FAMILIES } from './nextpnr-types';
 import { FunctionInfo } from './types';
 import { ClashManifestParser } from './clash-manifest-parser';
 import { ToolchainChecker } from './toolchain';
+import { initializeToolProvider, getToolProvider } from './tool-provider';
 import { initializeLogger, getLogger } from './file-logger';
 import { ClashCodeActionProvider } from './clash-code-actions';
 import { SynthesisSettingsPanel } from './synthesis-settings-panel';
@@ -129,6 +130,9 @@ export function activate(context: vscode.ExtensionContext) {
 	context.subscriptions.push(clashDiagnostics);
 	yosysRunner = new YosysRunner(outputChannel);
 	nextpnrRunner = new NextpnrRunner(outputChannel);
+	// Managed toolchain: lets the extension download and use its own copies of
+	// yosys/nextpnr/dot when they aren't on the user's PATH.
+	initializeToolProvider(context, outputChannel);
 	toolchain = new ToolchainChecker(outputChannel);
 
 	// Register sidebar tree view for synthesis results.
@@ -480,6 +484,23 @@ function registerCommands(context: vscode.ExtensionContext) {
 					? '  ✓ HLS (via Haskell extension): available'
 					: `  ✗ HLS: ${hls.message}`
 			);
+			const provider = getToolProvider();
+			if (provider) {
+				outputChannel.appendLine('');
+				outputChannel.appendLine(provider.describeStatus());
+			}
+		})
+	);
+
+	// Download/manage the bundled toolchain (yosys, nextpnr, Graphviz) so the
+	// extension can run without those tools on the user's PATH.
+	context.subscriptions.push(
+		vscode.commands.registerCommand('clash-toolkit.installToolchain', async () => {
+			const provider = getToolProvider();
+			if (!provider) { return; }
+			await provider.promptInstallOrManage();
+			// A fresh install changes tool availability — drop cached verdicts.
+			toolchain.clearCache();
 		})
 	);
 }

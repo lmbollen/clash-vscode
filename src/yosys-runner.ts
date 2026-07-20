@@ -14,6 +14,7 @@ import { ComponentInfo } from './clash-manifest-types';
 import { getLogger } from './file-logger';
 import { getDefaultScript, resolveScript } from './synthesis-targets';
 import { splitCommand } from './toolchain';
+import { resolveTool, toolSpawnEnv } from './tool-provider';
 
 /**
  * Resolve the yosys executable + leading args from the user's
@@ -25,7 +26,9 @@ function resolveYosysCommand(): { cmd: string; baseArgs: string[] } {
 	const raw = vscode.workspace.getConfiguration('clash-toolkit')
 		.get<string>('yosysCommand', 'yosys');
 	const parts = splitCommand((raw || 'yosys').trim());
-	return { cmd: parts[0] || 'yosys', baseArgs: parts.slice(1) };
+	// Resolve through the managed toolchain: falls back to a downloaded copy
+	// when the user has no yosys on PATH, otherwise returns the name unchanged.
+	return { cmd: resolveTool(parts[0] || 'yosys'), baseArgs: parts.slice(1) };
 }
 
 /**
@@ -64,8 +67,9 @@ async function convertDotToSvg(
 	return new Promise((resolve) => {
 		const logger = getLogger();
 		const args = ['-Tsvg', dotPath, '-o', svgPath];
-		const finishLog = logger?.command('dot', args);
-		const proc = spawn('dot', args);
+		const dotCmd = resolveTool('dot');
+		const finishLog = logger?.command(dotCmd, args);
+		const proc = spawn(dotCmd, args, { env: toolSpawnEnv(dotCmd) });
 		let stderr = '';
 		proc.stderr.on('data', (d) => { stderr += d.toString(); });
 		// `dot` is fire-and-forget; the parent extension/test may have
@@ -195,7 +199,7 @@ export class YosysRunner {
 			const finishLog = logger?.command(yosysCmd, yosysArgs, options.workspaceRoot);
 			const yosys = spawn(yosysCmd, yosysArgs, {
 				cwd: options.workspaceRoot,
-				env: process.env
+				env: toolSpawnEnv(yosysCmd)
 			});
 
 			let stdout = '';
@@ -840,7 +844,7 @@ export class YosysRunner {
 			const finishLog = logger?.command(yosysCmd, args, cwd);
 			const yosys = spawn(yosysCmd, args, {
 				cwd,
-				env: process.env
+				env: toolSpawnEnv(yosysCmd)
 			});
 
 			let stdout = '';

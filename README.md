@@ -10,11 +10,18 @@ Haskell source → Clash (Verilog) → Yosys (synthesis) → nextpnr (place & ro
 
 ## Quick Start
 
-1. Install the extension and have Clash, HLS, Yosys, and nextpnr on your PATH (e.g. via `nix develop`).
+1. Install the extension. You need Clash and HLS available (e.g. via `nix develop`).
+   **Yosys, nextpnr and Graphviz `dot` are optional** — if a command needs one
+   that isn't on your PATH, the extension shows a checklist of tools (missing
+   ones pre-checked, found ones unchecked) and downloads the checked tools from
+   a self-contained [OSS CAD Suite](https://github.com/YosysHQ/oss-cad-suite-build)
+   build into its own storage. You choose, per tool, which to manage.
 2. Open a Clash project, make sure HLS is running.
 3. Open a `.hs` file → **Ctrl+.** on a monomorphic function → **Synthesize** (or use the Command Palette).
 
-Run **Clash: Check Toolchain** to verify tool availability.
+Run **Clash: Check Toolchain** to verify tool availability, or **Clash: Install
+Toolchain** to download the bundled toolchain up front. A tool you already have
+on your PATH is always used in preference to the managed copy.
 
 ## Documentation
 

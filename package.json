@@ -4,7 +4,7 @@
   "description": "Community extension for Clash: synthesize, view schematics, and place-and-route Haskell hardware designs with Yosys and nextpnr.",
   "version": "0.1.0",
   "license": "BSD-2-Clause",
-  "publisher": "lmbollen",
+  "publisher": "LucasBollen",
   "icon": "resources/clash-icon.png",
   "repository": {
     "type": "git",
@@ -87,6 +87,11 @@
       {
         "command": "clash-toolkit.checkToolchain",
         "title": "Clash: Check Toolchain"
+      },
+      {
+        "command": "clash-toolkit.installToolchain",
+        "title": "Clash: Install Toolchain",
+        "icon": "$(cloud-download)"
       },
       {
         "command": "clash-toolkit.refreshHaskellFunctions",
@@ -354,6 +359,9 @@
     "test:unit": "echo 'Unit tests require running in VS Code test environment. Use F5 with Extension Tests configuration.'",
     "package": "vsce package",
     "publish": "vsce publish"
+  },
+  "dependencies": {
+    "tar": "^7.4.3"
   },
   "devDependencies": {
     "@types/mocha": "^10.0.10",
