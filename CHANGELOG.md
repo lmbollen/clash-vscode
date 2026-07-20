@@ -5,6 +5,17 @@ All notable changes to **Clash Toolkit** are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] - 2026-07-20
+
+### Added
+- Managed toolchain: when `yosys`, `nextpnr-*`, or Graphviz `dot` are not on the
+  user's PATH, the extension shows a per-tool checklist (missing tools
+  pre-checked, tools found on PATH unchecked) and downloads the selected ones
+  from a self-contained OSS CAD Suite build into its own global storage, then
+  runs those managed binaries. The choice is per tool and persisted; unchecked
+  tools continue to use the user's PATH. Added the **Clash: Install Toolchain**
+  command to review and change the selection on demand.
+
 ## [0.1.0] - 2026-07-20
 
 Initial public release.
@@ -20,10 +31,3 @@ Initial public release.
 - Synthesis results and run history tree views.
 - Configurable Yosys scripts per target with placeholder substitution.
 - Toolchain check command to verify external tool availability.
-- Managed toolchain: when `yosys`, `nextpnr-*`, or Graphviz `dot` are not on the
-  user's PATH, the extension shows a per-tool checklist (missing tools
-  pre-checked, tools found on PATH unchecked) and downloads the selected ones
-  from a self-contained OSS CAD Suite build into its own global storage, then
-  runs those managed binaries. The choice is per tool and persisted; unchecked
-  tools continue to use the user's PATH. Added the **Clash: Install Toolchain**
-  command to review and change the selection on demand.

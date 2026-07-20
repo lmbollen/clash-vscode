@@ -2,18 +2,18 @@
   "name": "clash-toolkit",
   "displayName": "Clash Toolkit",
   "description": "Community extension for Clash: synthesize, view schematics, and place-and-route Haskell hardware designs with Yosys and nextpnr.",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "license": "BSD-2-Clause",
   "publisher": "LucasBollen",
   "icon": "resources/clash-icon.png",
   "repository": {
     "type": "git",
-    "url": "https://github.com/lmbollen/clash-toolkit"
+    "url": "https://github.com/lmbollen/clash-vscode"
   },
   "bugs": {
-    "url": "https://github.com/lmbollen/clash-toolkit/issues"
+    "url": "https://github.com/lmbollen/clash-vscode/issues"
   },
-  "homepage": "https://github.com/lmbollen/clash-toolkit#readme",
+  "homepage": "https://github.com/lmbollen/clash-vscode#readme",
   "engines": {
     "vscode": "^1.85.0"
   },
