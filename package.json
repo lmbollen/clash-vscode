@@ -247,7 +247,6 @@
             "ecp5",
             "xilinx",
             "gowin",
-            "intel",
             "quicklogic",
             "sf2"
           ],
@@ -298,12 +297,6 @@
           "default": "",
           "editPresentation": "multilineText",
           "description": "Custom Yosys script for Gowin target. Leave empty to use the built-in default. Placeholders: {files}, {topModule}, {outputDir}, {outputBaseName}"
-        },
-        "clash-toolkit.synthesisScript.intel": {
-          "type": "string",
-          "default": "",
-          "editPresentation": "multilineText",
-          "description": "Custom Yosys script for Intel target. Leave empty to use the built-in default. Placeholders: {files}, {topModule}, {outputDir}, {outputBaseName}"
         },
         "clash-toolkit.synthesisScript.quicklogic": {
           "type": "string",

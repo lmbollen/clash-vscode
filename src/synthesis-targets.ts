@@ -42,13 +42,13 @@ ${synthLine}
 check -assert
 
 # Machine-readable statistics (parsed by the extension)
-tee -q -o {outputDir}/stats.json stat -json
+tee -q -o "{outputDir}/stats.json" stat -json
 
 # Report longest topological path (combinational depth)
-tee -q -o {outputDir}/logic_depth.txt ltp -noff
+tee -o "{outputDir}/logic_depth.txt" ltp -noff
 
 # Write synthesized Verilog
-write_verilog -noattr {outputDir}/{outputBaseName}_synth.v
+write_verilog -noattr "{outputDir}/{outputBaseName}_synth.v"
 
 # Strip timing-only cells before further export
 delete */t:$specify2 */t:$specify3
@@ -56,9 +56,11 @@ opt_clean
 clean
 
 # Write JSON netlist (for downstream tools)
-write_json {outputDir}/{outputBaseName}.json
+write_json "{outputDir}/{outputBaseName}.json"
 
 # Render diagram via Graphviz (dot is invoked separately by the extension)
+# NOTE: -prefix must stay unquoted — yosys's show takes the token verbatim,
+# so quotes would become part of the .dot filename.
 show -format dot -prefix {outputDir}/{outputBaseName} -viewer none -notitle
 `;
 }
@@ -85,13 +87,13 @@ opt
 check -assert
 
 # Machine-readable statistics (parsed by the extension)
-tee -q -o {outputDir}/stats.json stat -json
+tee -q -o "{outputDir}/stats.json" stat -json
 
 # Report longest topological path (combinational depth)
-tee -q -o {outputDir}/logic_depth.txt ltp -noff
+tee -o "{outputDir}/logic_depth.txt" ltp -noff
 
 # Write synthesized Verilog
-write_verilog -noattr {outputDir}/{outputBaseName}_synth.v
+write_verilog -noattr "{outputDir}/{outputBaseName}_synth.v"
 
 # Strip timing-only cells before further export
 delete */t:$specify2 */t:$specify3
@@ -99,9 +101,11 @@ opt_clean
 clean
 
 # Write JSON netlist (for downstream tools)
-write_json {outputDir}/{outputBaseName}.json
+write_json "{outputDir}/{outputBaseName}.json"
 
 # Render diagram via Graphviz (dot is invoked separately by the extension)
+# NOTE: -prefix must stay unquoted — yosys's show takes the token verbatim,
+# so quotes would become part of the .dot filename.
 show -format dot -prefix {outputDir}/{outputBaseName} -viewer none -notitle
 `;
 
@@ -119,17 +123,19 @@ opt_clean
 check -assert
 
 # Machine-readable statistics (elaborated, pre-synthesis)
-tee -q -o {outputDir}/stats.json stat -json
+tee -q -o "{outputDir}/stats.json" stat -json
 
 # Report longest topological path (combinational depth)
-tee -q -o {outputDir}/logic_depth.txt ltp -noff
+tee -o "{outputDir}/logic_depth.txt" ltp -noff
 
 clean
 
 # Write JSON netlist (for downstream tools)
-write_json {outputDir}/{outputBaseName}.json
+write_json "{outputDir}/{outputBaseName}.json"
 
 # Render diagram via Graphviz (dot is invoked separately by the extension)
+# NOTE: -prefix must stay unquoted — yosys's show takes the token verbatim,
+# so quotes would become part of the .dot filename.
 show -format dot -prefix {outputDir}/{outputBaseName} -viewer none -notitle
 `;
 
@@ -193,9 +199,13 @@ export const TARGET_IDS: readonly string[] = targetList.map(t => t.id);
 // Helpers
 // ---------------------------------------------------------------------------
 
-/** Return the default script template for the given target id. */
+/**
+ * Return the default script template for the given target id.
+ * Throws on unknown ids — silently substituting the generic script would
+ * mask configuration bugs (e.g. a stale target id in workspace settings).
+ */
 export function getDefaultScript(targetId: string): string {
-	return SYNTHESIS_TARGETS.get(targetId)?.defaultScript ?? GENERIC_SCRIPT;
+	return getTarget(targetId).defaultScript;
 }
 
 /** Default script for the elaboration-only stage (no technology mapping). */
@@ -203,9 +213,19 @@ export function getDefaultElaborationScript(): string {
 	return ELABORATION_SCRIPT;
 }
 
-/** Return the SynthesisTarget for the given id, falling back to generic. */
+/**
+ * Return the SynthesisTarget for the given id.
+ * Throws on unknown ids rather than falling back to generic.
+ */
 export function getTarget(targetId: string): SynthesisTarget {
-	return SYNTHESIS_TARGETS.get(targetId) ?? SYNTHESIS_TARGETS.get('generic')!;
+	const target = SYNTHESIS_TARGETS.get(targetId);
+	if (!target) {
+		throw new Error(
+			`Unknown synthesis target "${targetId}" — expected one of: ${TARGET_IDS.join(', ')}. ` +
+			'Check the clash-toolkit.synthesisTarget setting.'
+		);
+	}
+	return target;
 }
 
 /**
@@ -223,7 +243,9 @@ export function resolveScript(
 		outputBaseName: string;
 	}
 ): string {
-	const filesBlock = vars.files.map(f => `read_verilog ${f}`).join('\n');
+	// Quote each path — unquoted paths containing spaces make yosys fail
+	// with "File `/…/My' not found".
+	const filesBlock = vars.files.map(f => `read_verilog "${f}"`).join('\n');
 	return template
 		.replace(/\{files\}/g, filesBlock)
 		.replace(/\{topModule\}/g, vars.topModule)

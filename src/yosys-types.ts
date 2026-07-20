@@ -22,10 +22,13 @@ export interface YosysOptions {
 	libertyFile?: string;
 	
 	/** Target FPGA family (optional). Use 'elaborate' for the elaboration-only stage. */
-	targetFamily?: 'ice40' | 'ecp5' | 'xilinx' | 'gowin' | 'intel' | 'quicklogic' | 'sf2' | 'generic' | 'elaborate';
+	targetFamily?: 'ice40' | 'ecp5' | 'xilinx' | 'gowin' | 'quicklogic' | 'sf2' | 'generic' | 'elaborate';
 
 	/** User-customized synthesis script template. Overrides the default for targetFamily. */
 	customScript?: string;
+
+	/** Abort signal — cancels the run by killing the yosys process. */
+	abortSignal?: AbortSignal;
 }
 
 /**
@@ -38,7 +41,7 @@ export interface YosysSynthesisResult {
 	/** Path to synthesized Verilog file */
 	synthesizedVerilogPath?: string;
 	
-	/** Path to JSON output for DigitalJS */
+	/** Path to the JSON netlist output */
 	jsonPath?: string;
 
 	/** Path to the rendered SVG diagram (Graphviz) */
@@ -72,7 +75,7 @@ export interface ModuleSynthesisResult {
 	netlistPath?: string;
 	/** Path to RTLIL (.il) file (per-module mode) */
 	rtlilPath?: string;
-	/** Path to JSON for DigitalJS visualization (per-module mode) */
+	/** Path to the per-module JSON netlist (per-module mode) */
 	diagramJsonPath?: string;
 	/** Path to the rendered SVG diagram (Graphviz) for this module */
 	svgPath?: string;

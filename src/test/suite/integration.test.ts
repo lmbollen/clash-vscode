@@ -253,27 +253,15 @@ suite('Integration: Full Synthesis + PnR Flow', () => {
 		const projectDirs = CodeGenerator.getProjectDirectories(wsRoot, testFunc);
 		const verilogInput = allVerilogFiles || verilogPath;
 
-		// Use parallel OOC synthesis when manifest is available
-		let result;
-		if (manifestPath) {
-			const parser = new ClashManifestParser();
-			const components = await parser.buildDependencyGraph(manifestPath);
-			result = await yosysRunner.synthesizeParallel(components, {
-				workspaceRoot: wsRoot,
-				outputDir: projectDirs.yosys,
-				topModule,
-				verilogPath: verilogInput,
-				targetFamily: 'ecp5',
-			});
-		} else {
-			result = await yosysRunner.synthesize({
-				workspaceRoot: wsRoot,
-				outputDir: projectDirs.yosys,
-				topModule,
-				verilogPath: verilogInput,
-				targetFamily: 'ecp5',
-			});
-		}
+		// Whole-design synthesis — the same path the extension's P&R flow uses
+		// (nextpnr needs a merged netlist).
+		const result = await yosysRunner.synthesize({
+			workspaceRoot: wsRoot,
+			outputDir: projectDirs.yosys,
+			topModule,
+			verilogPath: verilogInput,
+			targetFamily: 'ecp5',
+		});
 
 		assert.ok(result.success, `Yosys synthesis should succeed.\nErrors: ${result.errors.map(e => e.message).join('\n')}`);
 		assert.ok(result.jsonPath, 'Should produce a JSON netlist');

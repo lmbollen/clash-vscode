@@ -1,4 +1,7 @@
 import * as assert from 'assert';
+import * as os from 'os';
+import * as path from 'path';
+import { promises as fs } from 'fs';
 import * as vscode from 'vscode';
 import { ModuleSynthesisResult, YosysOptions } from '../../yosys-types';
 import {
@@ -15,6 +18,23 @@ import { YosysRunner } from '../../yosys-runner';
  * - ModuleSynthesisResult per-module fields (incl. logic depth)
  */
 suite('Synthesis Features', () => {
+
+	suiteSetup(async () => {
+		// The config tests below assert *effective* values equal the schema
+		// defaults, so clear any workspace overrides first — e.g. values the
+		// settings panel persisted into test-project/.vscode/settings.json
+		// when someone used the extension on the test project itself.
+		const config = vscode.workspace.getConfiguration('clash-toolkit');
+		const keys = [
+			'outOfContext',
+			'synthesisTarget',
+			'elaborationScript',
+			...TARGET_IDS.map(id => `synthesisScript.${id}`),
+		];
+		for (const key of keys) {
+			await config.update(key, undefined, vscode.ConfigurationTarget.Workspace);
+		}
+	});
 
 	// ---------------------------------------------------------------
 	// Command registration
@@ -144,7 +164,7 @@ suite('Synthesis Features', () => {
 
 	test('synthesisScript per-target settings default to empty string', () => {
 		const config = vscode.workspace.getConfiguration('clash-toolkit');
-		const targets = ['generic', 'ice40', 'ecp5', 'xilinx', 'gowin', 'intel', 'quicklogic', 'sf2'];
+		const targets = ['generic', 'ice40', 'ecp5', 'xilinx', 'gowin', 'quicklogic', 'sf2'];
 		for (const id of targets) {
 			const script = config.get<string>(`synthesisScript.${id}`);
 			assert.strictEqual(script, '', `synthesisScript.${id} should default to empty string`);
@@ -179,7 +199,7 @@ suite('Synthesis Features', () => {
 
 	test('YosysOptions supports all new targetFamily values', () => {
 		const families: Array<YosysOptions['targetFamily']> = [
-			'ice40', 'ecp5', 'xilinx', 'gowin', 'intel', 'quicklogic', 'sf2', 'generic', 'elaborate'
+			'ice40', 'ecp5', 'xilinx', 'gowin', 'quicklogic', 'sf2', 'generic', 'elaborate'
 		];
 		for (const family of families) {
 			const opts: YosysOptions = {
@@ -226,20 +246,40 @@ suite('Synthesis Features', () => {
 		}
 	});
 
-	test('parseStatisticsOutput extracts ltp logic depth', () => {
-		const sampleOutput = [
-			'-- Running command `ltp -noff` --',
-			'',
-			'Longest topological path in deepChain (length=16):',
-			'    $add',
-			'    $add',
-			'    $add',
-			'',
-			'Number of wires:               42',
-			'Number of cells:               16',
-		].join('\n');
-		const stats = YosysRunner.parseStatisticsOutput(sampleOutput);
-		assert.strictEqual(stats.logicDepth, 16);
+	test('loadStatistics throws loudly when stats.json is missing', async () => {
+		// No text-parse fallback: a script that dropped `stat -json` must fail
+		// visibly, not silently degrade to guessed statistics.
+		const emptyDir = await fs.mkdtemp(path.join(os.tmpdir(), 'clash-stats-'));
+		try {
+			await assert.rejects(
+				() => YosysRunner.loadStatistics(emptyDir, 'irrelevant text output'),
+				/stats\.json not found/
+			);
+		} finally {
+			await fs.rm(emptyDir, { recursive: true, force: true });
+		}
+	});
+
+	test('loadStatistics augments stats.json with ltp logic depth from the log', async () => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'clash-stats-'));
+		try {
+			await fs.writeFile(
+				path.join(dir, 'stats.json'),
+				JSON.stringify({ design: { num_cells: 16, num_wires: 42 } })
+			);
+			const log = [
+				'-- Running command `ltp -noff` --',
+				'',
+				'Longest topological path in deepChain (length=16):',
+				'    $add',
+			].join('\n');
+			const stats = await YosysRunner.loadStatistics(dir, log);
+			assert.strictEqual(stats.logicDepth, 16);
+			assert.strictEqual(stats.cellCount, 16);
+			assert.strictEqual(stats.wireCount, 42);
+		} finally {
+			await fs.rm(dir, { recursive: true, force: true });
+		}
 	});
 
 	test('parseStatsJson extracts counts and cell types from stat -json output', () => {
@@ -295,10 +335,90 @@ suite('Synthesis Features', () => {
 		assert.strictEqual(stats.cellTypes!.get('$or'), 6);
 	});
 
-	test('parseStatsJson returns empty stats for malformed JSON', () => {
-		const stats = YosysRunner.parseStatsJson('{not valid json');
-		assert.strictEqual(stats.cellCount, undefined);
-		assert.strictEqual(stats.wireCount, undefined);
+	test('parseStatsJson throws loudly on malformed JSON', () => {
+		assert.throws(
+			() => YosysRunner.parseStatsJson('{not valid json'),
+			/stats\.json is unparseable/
+		);
+	});
+
+	test('parseStatsJson throws loudly on valid JSON with no stats blocks', () => {
+		assert.throws(
+			() => YosysRunner.parseStatsJson('{"creator": "Yosys 0.62"}'),
+			/neither a "design" nor a "modules" block/
+		);
+	});
+
+	test('synthesize honours abortSignal: kills yosys and reports cancellation', async function () {
+		this.timeout(20_000);
+
+		const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'clash-cancel-'));
+		const cfg = vscode.workspace.getConfiguration('clash-toolkit');
+		const channel = vscode.window.createOutputChannel('Test Yosys Cancel');
+		try {
+			// A fake "yosys" that never exits on its own — the runner must
+			// SIGTERM it via the abort signal. Pointing yosysCommand at it
+			// also exercises the setting-resolution path.
+			const fakeJs = path.join(tmp, 'fake-yosys.js');
+			await fs.writeFile(fakeJs, 'setInterval(() => process.stdout.write("Info: alive\\n"), 100);\n');
+			await cfg.update('yosysCommand', `node ${fakeJs}`, vscode.ConfigurationTarget.Workspace);
+
+			const verilog = path.join(tmp, 'top.v');
+			await fs.writeFile(verilog, 'module top; endmodule\n');
+
+			const controller = new AbortController();
+			setTimeout(() => controller.abort(), 400);
+
+			const runner = new YosysRunner(channel);
+			const result = await runner.synthesize({
+				workspaceRoot: tmp,
+				outputDir: path.join(tmp, 'out'),
+				topModule: 'top',
+				verilogPath: [verilog],
+				targetFamily: 'generic',
+				abortSignal: controller.signal,
+			});
+
+			assert.strictEqual(result.success, false, 'Cancelled run is not a success');
+			assert.ok(
+				result.errors.some(e => /cancel/i.test(e.message)),
+				`Cancellation should be surfaced. Got: ${JSON.stringify(result.errors)}`
+			);
+		} finally {
+			await cfg.update('yosysCommand', undefined, vscode.ConfigurationTarget.Workspace);
+			channel.dispose();
+			await fs.rm(tmp, { recursive: true, force: true });
+		}
+	});
+
+	test('synthesize with an already-aborted signal fails as cancelled', async function () {
+		this.timeout(20_000);
+
+		const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'clash-cancel-'));
+		const channel = vscode.window.createOutputChannel('Test Yosys Pre-Cancel');
+		try {
+			const verilog = path.join(tmp, 'top.v');
+			await fs.writeFile(verilog, 'module top; endmodule\n');
+
+			const controller = new AbortController();
+			controller.abort();
+
+			const runner = new YosysRunner(channel);
+			const result = await runner.synthesize({
+				workspaceRoot: tmp,
+				outputDir: path.join(tmp, 'out'),
+				topModule: 'top',
+				verilogPath: [verilog],
+				targetFamily: 'generic',
+				abortSignal: controller.signal,
+			});
+
+			assert.strictEqual(result.success, false);
+			assert.ok(result.errors.some(e => /cancel/i.test(e.message)));
+		} finally {
+			channel.dispose();
+			await fs.rm(tmp, { recursive: true, force: true });
+		}
 	});
 
 	test('parseLogicDepth extracts length from ltp text', () => {

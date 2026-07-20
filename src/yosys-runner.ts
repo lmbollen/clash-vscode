@@ -12,7 +12,36 @@ import {
 } from './yosys-types';
 import { ComponentInfo } from './clash-manifest-types';
 import { getLogger } from './file-logger';
-import { getTarget, getDefaultScript, resolveScript } from './synthesis-targets';
+import { getDefaultScript, resolveScript } from './synthesis-targets';
+import { splitCommand } from './toolchain';
+
+/**
+ * Resolve the yosys executable + leading args from the user's
+ * `clash-toolkit.yosysCommand` setting — the same command the pre-flight
+ * toolchain check probes, so "check passes but synthesis spawns a different
+ * yosys" cannot happen.
+ */
+function resolveYosysCommand(): { cmd: string; baseArgs: string[] } {
+	const raw = vscode.workspace.getConfiguration('clash-toolkit')
+		.get<string>('yosysCommand', 'yosys');
+	const parts = splitCommand((raw || 'yosys').trim());
+	return { cmd: parts[0] || 'yosys', baseArgs: parts.slice(1) };
+}
+
+/**
+ * Split a stdio chunk stream into complete lines, buffering partial lines
+ * across chunk boundaries so a line straddling a pipe-chunk boundary is not
+ * missed or double-counted by line-oriented matchers.
+ */
+function makeLineSplitter(onLine: (line: string) => void): (chunk: string) => void {
+	let buf = '';
+	return (chunk: string) => {
+		buf += chunk;
+		const lines = buf.split('\n');
+		buf = lines.pop() ?? '';
+		for (const line of lines) { onLine(line); }
+	};
+}
 
 /**
  * Render a Graphviz `.dot` file to `.svg` next to it.
@@ -154,46 +183,85 @@ export class YosysRunner {
 		// Let yosys write its own log file — more reliable than capturing
 		// stdout+stderr ourselves (survives crashes, flushes in real time).
 		const logPath = path.join(options.outputDir, 'yosys.log');
-		const yosysArgs = ['-l', logPath, '-s', scriptPath];
+		const { cmd: yosysCmd, baseArgs } = resolveYosysCommand();
+		const yosysArgs = [...baseArgs, '-l', logPath, '-s', scriptPath];
+
+		// Safety net: abc is known to hang indefinitely on some large-RAM
+		// designs, and this is the path every P&R run takes.
+		const TIMEOUT_MS = 600_000;
 
 		return new Promise((resolve) => {
 			const logger = getLogger();
-			const finishLog = logger?.command('yosys', yosysArgs, options.workspaceRoot);
-			const yosys = spawn('yosys', yosysArgs, {
+			const finishLog = logger?.command(yosysCmd, yosysArgs, options.workspaceRoot);
+			const yosys = spawn(yosysCmd, yosysArgs, {
 				cwd: options.workspaceRoot,
 				env: process.env
 			});
 
 			let stdout = '';
 			let stderr = '';
+			let settled = false;
+			let timedOut = false;
+			let killTimer: ReturnType<typeof setTimeout> | undefined;
 			const warnings: YosysWarning[] = [];
 			const errors: YosysError[] = [];
+
+			// SIGTERM first; escalate to SIGKILL if yosys/abc ignores it.
+			const kill = (why: string) => {
+				if (settled) { return; }
+				this.outputChannel.appendLine(`\nWARNING: ${why} — terminating yosys`);
+				yosys.kill('SIGTERM');
+				killTimer = setTimeout(() => {
+					if (!settled) { yosys.kill('SIGKILL'); }
+				}, 5000);
+			};
+			const timeoutHandle = setTimeout(() => {
+				timedOut = true;
+				kill(`Yosys timed out after ${TIMEOUT_MS / 1000}s`);
+			}, TIMEOUT_MS);
+			const onAbort = () => kill('Synthesis cancelled');
+			if (options.abortSignal?.aborted) {
+				onAbort();
+			} else {
+				options.abortSignal?.addEventListener('abort', onAbort, { once: true });
+			}
+			const cleanup = () => {
+				settled = true;
+				clearTimeout(timeoutHandle);
+				if (killTimer) { clearTimeout(killTimer); }
+				options.abortSignal?.removeEventListener('abort', onAbort);
+			};
+
+			// Line-buffered so messages straddling chunk boundaries aren't
+			// missed, and so a path containing "error" isn't recorded as one.
+			const splitOut = makeLineSplitter((line) => {
+				if (/^Warning:/i.test(line.trim())) {
+					warnings.push({ message: line.trim() });
+				}
+			});
+			const splitErr = makeLineSplitter((line) => {
+				if (/^ERROR:/.test(line.trim())) {
+					errors.push({ message: line.trim() });
+				}
+			});
 
 			yosys.stdout.on('data', (data) => {
 				const text = data.toString();
 				stdout += text;
 				this.outputChannel.append(text);
-
-				// Parse warnings in real-time
-				const warningMatch = text.match(/warning:/i);
-				if (warningMatch) {
-					warnings.push({ message: text.trim() });
-				}
+				splitOut(text);
 			});
 
 			yosys.stderr.on('data', (data) => {
 				const text = data.toString();
 				stderr += text;
 				this.outputChannel.append(text);
-
-				// Parse errors in real-time
-				if (text.toLowerCase().includes('error')) {
-					errors.push({ message: text.trim() });
-				}
+				splitErr(text);
 			});
 
 			yosys.on('error', (error) => {
-				this.outputChannel.appendLine(`\nERROR: Failed to spawn yosys: ${error.message}`);
+				cleanup();
+				this.outputChannel.appendLine(`\nERROR: Failed to spawn ${yosysCmd}: ${error.message}`);
 				this.outputChannel.appendLine('Make sure Yosys is installed and in your PATH');
 				resolve({
 					success: false,
@@ -204,10 +272,24 @@ export class YosysRunner {
 			});
 
 			yosys.on('close', async (code) => {
+				cleanup();
 				finishLog?.then(fn => fn(code));
 				this.outputChannel.appendLine('');
 				this.outputChannel.appendLine(`Yosys exited with code ${code}`);
 				this.outputChannel.appendLine(`Log: ${logPath}`);
+
+				if (options.abortSignal?.aborted || timedOut) {
+					const reason = timedOut
+						? `Yosys timed out after ${TIMEOUT_MS / 1000}s`
+						: 'Synthesis cancelled';
+					resolve({
+						success: false,
+						output: stdout + stderr,
+						warnings,
+						errors: [{ message: reason }]
+					});
+					return;
+				}
 
 				if (code === 0) {
 					this.outputChannel.appendLine('✓ Synthesis successful');
@@ -215,7 +297,22 @@ export class YosysRunner {
 					// Parse statistics: prefer the structured stats.json written
 					// by the script's `stat -json`, fall back to text parsing
 					// for custom scripts that don't emit one.
-					const stats = await YosysRunner.loadStatistics(options.outputDir, stdout);
+					// Missing/unparseable stats.json is a loud failure — the
+					// run's outputs cannot be trusted to be complete.
+					let stats: SynthesisStatistics;
+					try {
+						stats = await YosysRunner.loadStatistics(options.outputDir, stdout);
+					} catch (statsErr) {
+						const message = statsErr instanceof Error ? statsErr.message : String(statsErr);
+						this.outputChannel.appendLine(`✗ ${message}`);
+						resolve({
+							success: false,
+							output: stdout + stderr,
+							warnings,
+							errors: [{ message }]
+						});
+						return;
+					}
 
 					// Save human-readable statistics report
 					try {
@@ -257,18 +354,6 @@ export class YosysRunner {
 				}
 			});
 		});
-	}
-
-	/**
-	 * Get the Yosys synthesis command for a given FPGA family.
-	 * Returns the `synth_*` command string, or null for generic synthesis.
-	 */
-	static getSynthCommand(targetFamily: string, topModule: string): string | null {
-		const target = getTarget(targetFamily);
-		if (target.synthCommand) {
-			return `${target.synthCommand} -top ${topModule}`;
-		}
-		return null; // generic synthesis (no single command)
 	}
 
 	/**
@@ -316,27 +401,29 @@ export class YosysRunner {
 	/**
 	 * Load synthesis statistics for a run.
 	 *
-	 * Preferred path: read the `stats.json` written by the script's
-	 * `stat -json`, which is machine-readable and immune to text-format
-	 * drift.  Always augment with ltp output (and any other text-only
-	 * fields) parsed from the Yosys stdout log.
+	 * Reads the `stats.json` written by the script's `stat -json`, which is
+	 * machine-readable and immune to text-format drift, and augments it with
+	 * ltp output (a text-only field) parsed from the Yosys stdout log.
 	 *
-	 * Falls back to pure text parsing when the JSON file is missing —
-	 * e.g. if a custom script removed the `stat -json` line.
+	 * Throws when the JSON file is missing or unparseable — a custom script
+	 * that removed the `stat -json` line should fail loudly, not silently
+	 * degrade to guessing statistics out of the text log.
 	 */
 	static async loadStatistics(outputDir: string, textOutput: string): Promise<SynthesisStatistics> {
-		let stats: SynthesisStatistics = { rawStats: '' };
-
 		const jsonPath = path.join(outputDir, 'stats.json');
+		let raw: string;
 		try {
-			const raw = await fs.readFile(jsonPath, 'utf8');
-			stats = YosysRunner.parseStatsJson(raw);
+			raw = await fs.readFile(jsonPath, 'utf8');
 		} catch {
-			// No stats.json — fall back to parsing the text log.
-			stats = YosysRunner.parseStatisticsOutput(textOutput);
+			throw new Error(
+				`stats.json not found in ${outputDir} — the synthesis script must emit ` +
+				'machine-readable statistics. Keep the ' +
+				'`tee -q -o "{outputDir}/stats.json" stat -json` line in custom scripts.'
+			);
 		}
+		const stats = YosysRunner.parseStatsJson(raw);
 
-		// Always try to pull logic depth from the log — ltp isn't part of stats.json.
+		// Pull logic depth from the log — ltp isn't part of stats.json.
 		if (stats.logicDepth === undefined) {
 			const depth = YosysRunner.parseLogicDepth(textOutput);
 			if (depth !== undefined) { stats.logicDepth = depth; }
@@ -370,15 +457,24 @@ export class YosysRunner {
 		let parsed: StatsJson;
 		try {
 			parsed = JSON.parse(jsonText) as StatsJson;
-		} catch {
-			return stats;
+		} catch (err) {
+			// Loud failure — a truncated/corrupt stats.json must not silently
+			// yield empty statistics.
+			throw new Error(
+				`stats.json is unparseable: ${err instanceof Error ? err.message : String(err)}`
+			);
 		}
 
 		// Prefer the aggregated `design` block if present, otherwise merge
 		// every module (yosys omits `design` for single-module designs).
 		const block = parsed.design
 			?? (parsed.modules ? YosysRunner.mergeStatsBlocks(Object.values(parsed.modules)) : undefined);
-		if (!block) { return stats; }
+		if (!block) {
+			throw new Error(
+				'stats.json contains neither a "design" nor a "modules" block — ' +
+				'not valid `stat -json` output.'
+			);
+		}
 
 		if (typeof block.num_cells === 'number') { stats.cellCount = block.num_cells; }
 		if (typeof block.num_wires === 'number') { stats.wireCount = block.num_wires; }
@@ -439,65 +535,6 @@ export class YosysRunner {
 	}
 
 	/**
-	 * Parse synthesis statistics from Yosys text output.
-	 *
-	 * Prefer `loadStatistics` + the `stat -json` file when available; this
-	 * text parser is retained as a fallback for scripts that don't emit
-	 * structured output.
-	 */
-	static parseStatisticsOutput(output: string): SynthesisStatistics {
-		const stats: SynthesisStatistics = {
-			rawStats: ''
-		};
-
-		// Extract statistics section
-		const statsMatch = output.match(/=== .+ ===([\s\S]+?)(?:===|$)/);
-		if (statsMatch) {
-			stats.rawStats = statsMatch[1].trim();
-		}
-
-		// Parse number of cells
-		const cellMatch = output.match(/Number of cells:\s+(\d+)/);
-		if (cellMatch) {
-			stats.cellCount = parseInt(cellMatch[1], 10);
-		}
-
-		// Parse number of wires
-		const wireMatch = output.match(/Number of wires:\s+(\d+)/);
-		if (wireMatch) {
-			stats.wireCount = parseInt(wireMatch[1], 10);
-		}
-
-		// Parse chip area
-		const areaMatch = output.match(/Chip area.*?:\s+([\d.]+)/);
-		if (areaMatch) {
-			stats.chipArea = parseFloat(areaMatch[1]);
-		}
-
-		// Parse cell types — capture both $-prefixed internal cells (e.g. "$dffe")
-		// and plain-name FPGA primitives (e.g. "LUT4", "TRELLIS_FF") that appear
-		// as indented lines after "Number of cells:" in yosys stat output.
-		const cellTypes = new Map<string, number>();
-		const cellTypeRegex = /^ {4,}(\$?\w+)\s+(\d+)\s*$/gm;
-		let match;
-		while ((match = cellTypeRegex.exec(output)) !== null) {
-			cellTypes.set(match[1], parseInt(match[2], 10));
-		}
-		if (cellTypes.size > 0) {
-			stats.cellTypes = cellTypes;
-		}
-
-		// Parse longest topological path length from `ltp` output.
-		// Yosys prints a line like "Longest topological path in <design> (length=N):".
-		const ltpMatch = output.match(/Longest topological path in\s+\S+\s+\(length=(\d+)\)/);
-		if (ltpMatch) {
-			stats.logicDepth = parseInt(ltpMatch[1], 10);
-		}
-
-		return stats;
-	}
-
-	/**
 	 * Format synthesis statistics for report file
 	 */
 	private formatStatisticsReport(stats: SynthesisStatistics): string {
@@ -527,7 +564,7 @@ export class YosysRunner {
 			const sortedTypes = Array.from(stats.cellTypes.entries())
 				.sort((a, b) => b[1] - a[1]); // Sort by count descending
 			for (const [type, count] of sortedTypes) {
-				report += `  $${type.padEnd(25)} ${count.toString().padStart(6)}\n`;
+				report += `  ${type.padEnd(26)} ${count.toString().padStart(6)}\n`;
 			}
 		}
 
@@ -540,130 +577,9 @@ export class YosysRunner {
 		return report;
 	}
 
-	// ---------------------------------------------------------------
-	// Parallel out-of-context (OOC) synthesis
-	// ---------------------------------------------------------------
-
-	/**
-	 * Synthesize a multi-module Clash design using parallel out-of-context
-	 * synthesis. Each component in the dependency graph is synthesized
-	 * independently, with independent components running in parallel.
-	 *
-	 * Falls back to regular `synthesize()` for single-component designs.
-	 */
-	async synthesizeParallel(
-		components: ComponentInfo[],
-		options: YosysOptions
-	): Promise<YosysSynthesisResult> {
-		if (components.length <= 1) {
-			return this.synthesize(options);
-		}
-
-		this.outputChannel.appendLine('');
-		this.outputChannel.appendLine('='.repeat(60));
-		this.outputChannel.appendLine('Parallel OOC Synthesis');
-		this.outputChannel.appendLine(`${components.length} components detected`);
-		this.outputChannel.appendLine('='.repeat(60));
-
-		const waves = YosysRunner.buildSynthesisWaves(components);
-
-		this.outputChannel.appendLine(`Planned ${waves.length} synthesis wave(s):`);
-		for (let i = 0; i < waves.length; i++) {
-			this.outputChannel.appendLine(
-				`  Wave ${i + 1}: ${waves[i].map(c => c.name).join(', ')}`
-			);
-		}
-
-		const moduleResults: ModuleSynthesisResult[] = [];
-		const netlistPaths = new Map<string, string>();
-		const oocDir = path.join(options.outputDir, 'ooc');
-		await fs.mkdir(oocDir, { recursive: true });
-
-		for (let i = 0; i < waves.length; i++) {
-			const wave = waves[i];
-			const isTopWave = i === waves.length - 1;
-
-			this.outputChannel.appendLine('');
-			this.outputChannel.appendLine(
-				`--- Wave ${i + 1}/${waves.length}: ${wave.map(c => c.name).join(', ')} ---`
-			);
-
-			if (isTopWave && wave.length === 1) {
-				// Top module: synthesize with pre-synthesized deps & full output
-				const topComponent = wave[0];
-				const depNetlists = topComponent.dependencies
-					.map(d => netlistPaths.get(d))
-					.filter((p): p is string => !!p);
-
-				const topResult = await this.synthesizeTopOOC(
-					topComponent, depNetlists, options
-				);
-				moduleResults.push(topResult.moduleResult);
-
-				return {
-					...topResult.synthesisResult,
-					moduleResults
-				};
-			}
-
-			// Synthesize all modules in this wave in parallel.
-			// Use an AbortController so that if any module fails, the
-			// remaining sibling processes are killed immediately instead
-			// of making the user wait for long-running syntheses.
-			const waveAbort = new AbortController();
-			const wavePromises = wave.map(async (component) => {
-				const moduleDir = path.join(oocDir, component.name);
-				await fs.mkdir(moduleDir, { recursive: true });
-
-				const depNetlists = component.dependencies
-					.map(d => netlistPaths.get(d))
-					.filter((p): p is string => !!p);
-
-				const result = await this.synthesizeModuleOOC(
-					component, depNetlists, moduleDir, options, waveAbort.signal
-				);
-				if (!result.success) {
-					waveAbort.abort();
-				}
-				return result;
-			});
-
-			const waveResults = await Promise.all(wavePromises);
-
-			for (const result of waveResults) {
-				moduleResults.push(result);
-				if (result.success && result.netlistPath) {
-					netlistPaths.set(result.name, result.netlistPath);
-				}
-			}
-
-			const failures = waveResults.filter(r => !r.success);
-			if (failures.length > 0) {
-				this.outputChannel.appendLine(
-					`✗ ${failures.length} module(s) failed in wave ${i + 1}`
-				);
-				return {
-					success: false,
-					output: '',
-					warnings: [],
-					errors: failures.flatMap(f => f.errors),
-					moduleResults
-				};
-			}
-		}
-
-		return {
-			success: false,
-			output: '',
-			warnings: [],
-			errors: [{ message: 'Internal error: no top module synthesized' }],
-			moduleResults
-		};
-	}
-
 	/**
 	 * Per-module synthesis: each component gets its own .il (RTLIL) and
-	 * .json (DigitalJS) output, allowing individual circuit diagrams.
+	 * .json netlist output, allowing individual circuit diagrams.
 	 *
 	 * Falls back to regular `synthesize()` for single-component designs.
 	 */
@@ -742,6 +658,18 @@ export class YosysRunner {
 		};
 
 		for (const component of components) {
+			// Stop scheduling further modules once the user cancels; the
+			// in-flight yosys process is killed via the signal below.
+			if (options.abortSignal?.aborted) {
+				return {
+					success: false,
+					output: '',
+					warnings: [],
+					errors: [{ message: `${flowLabel} cancelled` }],
+					moduleResults
+				};
+			}
+
 			const moduleDir = path.join(perModuleDir, component.name);
 			await fs.mkdir(moduleDir, { recursive: true });
 
@@ -763,12 +691,12 @@ export class YosysRunner {
 				}
 			}
 			for (const vFile of depVerilog) {
-				script += `read_verilog ${vFile}\n`;
+				script += `read_verilog "${vFile}"\n`;
 			}
 
 			// Read this component's own Verilog
 			for (const vFile of component.verilogFiles) {
-				script += `read_verilog ${vFile}\n`;
+				script += `read_verilog "${vFile}"\n`;
 			}
 
 			script += `\nhierarchy -check -top ${component.name}\n\n`;
@@ -788,12 +716,12 @@ export class YosysRunner {
 			}
 
 			script += `# Machine-readable statistics\n`;
-			script += `tee -q -o ${path.join(moduleDir, 'stats.json')} stat -json\n`;
+			script += `tee -q -o "${path.join(moduleDir, 'stats.json')}" stat -json\n`;
 			script += `# Report longest topological path (combinational depth)\n`;
-			script += `tee -q -o ${path.join(moduleDir, 'logic_depth.txt')} ltp -noff\n\n`;
-			script += `# Write RTLIL\nwrite_rtlil ${ilPath}\n\n`;
+			script += `tee -o "${path.join(moduleDir, 'logic_depth.txt')}" ltp -noff\n\n`;
+			script += `# Write RTLIL\nwrite_rtlil "${ilPath}"\n\n`;
 			script += `# Strip timing-only cells\ndelete */t:$specify2 */t:$specify3\nopt_clean\nclean\n`;
-			script += `write_json ${jsonPath}\n`;
+			script += `write_json "${jsonPath}"\n`;
 			// For elaboration, pass the component name explicitly so `show`
 			// renders only that module (sub-instances appear as boxes).  For
 			// synthesis the design is already flattened, so the default
@@ -804,10 +732,28 @@ export class YosysRunner {
 			await fs.writeFile(scriptPath, script);
 
 			const moduleLogPath = path.join(moduleDir, 'yosys.log');
-			const run = await this.runYosysScript(scriptPath, options.workspaceRoot, false, undefined, undefined, moduleLogPath);
+			const run = await this.runYosysScript(
+				scriptPath, options.workspaceRoot, false, options.abortSignal, undefined, moduleLogPath
+			);
 			const elapsed = Date.now() - startTime;
 
 			if (run.code === 0) {
+				// Missing stats.json turns this module into a loud failure —
+				// its outputs cannot be trusted to be complete.
+				let statistics: SynthesisStatistics;
+				try {
+					statistics = await YosysRunner.loadStatistics(moduleDir, run.stdout);
+				} catch (statsErr) {
+					const message = statsErr instanceof Error ? statsErr.message : String(statsErr);
+					this.outputChannel.appendLine(`  ✗ ${component.name}: ${message}`);
+					moduleResults.push({
+						name: component.name,
+						success: false,
+						elapsedMs: elapsed,
+						errors: [{ message }]
+					});
+					continue;
+				}
 				this.outputChannel.appendLine(`  ✓ ${component.name} (${elapsed}ms)`);
 				const svgPath = fireSvgConversion(dotPath, this.outputChannel);
 				moduleResults.push({
@@ -819,7 +765,7 @@ export class YosysRunner {
 					svgPath,
 					verilogFiles: component.verilogFiles,
 					elapsedMs: elapsed,
-					statistics: await YosysRunner.loadStatistics(moduleDir, run.stdout),
+					statistics,
 					errors: []
 				});
 			} else {
@@ -861,310 +807,6 @@ export class YosysRunner {
 	}
 
 	/**
-	 * Group components into waves of mutually-independent modules
-	 * that can be synthesized in parallel.
-	 */
-	static buildSynthesisWaves(components: ComponentInfo[]): ComponentInfo[][] {
-		const waves: ComponentInfo[][] = [];
-		const completed = new Set<string>();
-		const remaining = [...components];
-
-		while (remaining.length > 0) {
-			const wave: ComponentInfo[] = [];
-
-			for (let i = remaining.length - 1; i >= 0; i--) {
-				if (remaining[i].dependencies.every(d => completed.has(d))) {
-					wave.push(remaining[i]);
-					remaining.splice(i, 1);
-				}
-			}
-
-			if (wave.length === 0) {
-				// Circular dependency — add all remaining to break the cycle
-				wave.push(...remaining.splice(0));
-			}
-
-			for (const c of wave) {
-				completed.add(c.name);
-			}
-			waves.push(wave);
-		}
-
-		return waves;
-	}
-
-	/**
-	 * Synthesize a single sub-module out of context.
-	 */
-	private async synthesizeModuleOOC(
-		component: ComponentInfo,
-		depNetlists: string[],
-		moduleDir: string,
-		options: YosysOptions,
-		abortSignal?: AbortSignal
-	): Promise<ModuleSynthesisResult> {
-		const startTime = Date.now();
-		this.outputChannel.appendLine(`  Synthesizing ${component.name}...`);
-
-		const netlistPath = path.join(moduleDir, `${component.name}.json`);
-		const diagramJsonPath = path.join(moduleDir, `${component.name}_diagram.json`);
-		const dotPath = path.join(moduleDir, `${component.name}.dot`);
-		const script = this.generateOOCScript(
-			component, depNetlists, netlistPath, diagramJsonPath, options
-		);
-		const scriptPath = path.join(moduleDir, 'synth.ys');
-		await fs.writeFile(scriptPath, script);
-
-		const moduleLogPath = path.join(moduleDir, 'yosys.log');
-		const run = await this.runYosysScript(
-			scriptPath, options.workspaceRoot, false, abortSignal, undefined, moduleLogPath
-		);
-		const elapsed = Date.now() - startTime;
-
-		if (run.code === 0) {
-			this.outputChannel.appendLine(`  ✓ ${component.name} (${elapsed}ms)`);
-			const svgPath = fireSvgConversion(dotPath, this.outputChannel);
-			return {
-				name: component.name,
-				success: true,
-				netlistPath,
-				diagramJsonPath,
-				svgPath,
-				verilogFiles: component.verilogFiles,
-				elapsedMs: elapsed,
-				statistics: await YosysRunner.loadStatistics(moduleDir, run.stdout),
-				errors: []
-			};
-		} else {
-			this.outputChannel.appendLine(`  ✗ ${component.name} failed (${elapsed}ms)`);
-			return {
-				name: component.name,
-				success: false,
-				elapsedMs: elapsed,
-				errors: run.errors.length > 0
-					? run.errors
-					: [{ message: `Synthesis failed with code ${run.code}` }]
-			};
-		}
-	}
-
-	/**
-	 * Synthesize the top module, reading pre-synthesized dependency netlists,
-	 * and producing full output (synthesized Verilog, JSON, statistics).
-	 */
-	private async synthesizeTopOOC(
-		topComponent: ComponentInfo,
-		depNetlists: string[],
-		options: YosysOptions
-	): Promise<{
-		moduleResult: ModuleSynthesisResult;
-		synthesisResult: YosysSynthesisResult;
-	}> {
-		const startTime = Date.now();
-		this.outputChannel.appendLine(
-			`  Synthesizing top module ${topComponent.name} with ` +
-			`${depNetlists.length} pre-synthesized dep(s)...`
-		);
-
-		const outputBaseName = topComponent.name;
-		const synthesizedVerilog = path.join(
-			options.outputDir, `${outputBaseName}_synth.v`
-		);
-		const jsonPath = path.join(options.outputDir, `${outputBaseName}.json`);
-		const diagramJsonPath = path.join(options.outputDir, `${outputBaseName}_diagram.json`);
-		const dotPath = path.join(options.outputDir, `${outputBaseName}.dot`);
-		const statsJsonFile = path.join(options.outputDir, 'stats.json');
-		const ltpFile = path.join(options.outputDir, 'logic_depth.txt');
-
-		let script = `# Top Module OOC Synthesis: ${topComponent.name}\n\n`;
-
-		// Read pre-synthesized dependency netlists
-		for (const netlist of depNetlists) {
-			script += `read_json ${netlist}\n`;
-		}
-
-		// Read top module Verilog
-		for (const vFile of topComponent.verilogFiles) {
-			script += `read_verilog ${vFile}\n`;
-		}
-
-		script += `\nhierarchy -check -top ${topComponent.name}\n\n`;
-
-		// Target-specific synthesis
-		const synthCmd = YosysRunner.getSynthCommand(
-			options.targetFamily || 'generic', topComponent.name
-		);
-		if (synthCmd) {
-			script += `${synthCmd}\n\n`;
-		} else {
-			script += `proc\nopt\nfsm\nopt\nmemory\nopt\ntechmap\nopt\n\n`;
-		}
-
-		// Post-synth sanity check
-		script += `check -assert\n\n`;
-
-		// Machine-readable statistics
-		const statArgs = options.libertyFile ? `-liberty ${options.libertyFile} -json` : '-json';
-		script += `tee -q -o ${statsJsonFile} stat ${statArgs}\n`;
-		script += `# Report longest topological path (combinational depth)\n`;
-		script += `tee -q -o ${ltpFile} ltp -noff\n\n`;
-
-		// Outputs
-		script += `write_verilog -noattr ${synthesizedVerilog}\n\n`;
-		// PnR netlist — keep as-is (includes FPGA-mapped cells for nextpnr).
-		script += `write_json ${jsonPath}\n\n`;
-		// Diagram JSON — strip timing/specify cells before further export.
-		script += `delete */t:$specify2 */t:$specify3 */t:$specp\nopt_clean\nclean\n`;
-		script += `write_json ${diagramJsonPath}\n`;
-		script += `show -format dot -prefix ${path.join(options.outputDir, outputBaseName)} -viewer none -notitle\n`;
-
-		const scriptPath = path.join(options.outputDir, 'synth_top.ys');
-		await fs.writeFile(scriptPath, script);
-
-		const logPath = path.join(options.outputDir, 'yosys.log');
-		const run = await this.runYosysScript(
-			scriptPath, options.workspaceRoot, true, undefined, undefined, logPath
-		);
-		const elapsed = Date.now() - startTime;
-
-		const fullOutput = run.stdout + run.stderr;
-
-		if (run.code === 0) {
-			this.outputChannel.appendLine(`  ✓ Top module ${topComponent.name} (${elapsed}ms)`);
-			const stats = await YosysRunner.loadStatistics(options.outputDir, run.stdout);
-			const svgPath = fireSvgConversion(dotPath, this.outputChannel);
-
-			try {
-				const statsReport = this.formatStatisticsReport(stats);
-				await fs.writeFile(
-					path.join(options.outputDir, 'statistics.txt'), statsReport
-				);
-			} catch { /* ignore */ }
-
-			return {
-				moduleResult: {
-					name: topComponent.name,
-					success: true,
-					netlistPath: jsonPath,
-					diagramJsonPath,
-					svgPath,
-					verilogFiles: topComponent.verilogFiles,
-					elapsedMs: elapsed,
-					statistics: stats,
-					errors: []
-				},
-				synthesisResult: {
-					success: true,
-					synthesizedVerilogPath: synthesizedVerilog,
-					jsonPath,
-					svgPath,
-					statistics: stats,
-					output: fullOutput,
-					warnings: run.warnings,
-					errors: []
-				}
-			};
-		} else {
-			this.outputChannel.appendLine(`  ✗ Top module ${topComponent.name} failed (${elapsed}ms)`);
-			const errors = run.errors.length > 0
-				? run.errors
-				: [{ message: 'Synthesis failed' }];
-			return {
-				moduleResult: {
-					name: topComponent.name,
-					success: false,
-					elapsedMs: elapsed,
-					errors
-				},
-				synthesisResult: {
-					success: false,
-					output: fullOutput,
-					warnings: run.warnings,
-					errors
-				}
-			};
-		}
-	}
-
-	/**
-	 * Generate a Yosys script for out-of-context synthesis of one module.
-	 *
-	 * Runs only `proc`, `flatten`, `opt`, and `memory -nomap` — deliberately
-	 * omitting `memory_map` and `abc`.
-	 *
-	 * `memory_map` converts `$mem` cells to flat flip-flop arrays.  For large
-	 * RAMs (e.g. 16 384-entry arrays from Clash's `blockRamU`) this produces
-	 * hundreds of thousands of FFs, after which `abc` hangs indefinitely
-	 * trying to optimise the resulting mux trees.
-	 *
-	 * Keeping memories as abstract `$mem` cells in the JSON netlist lets the
-	 * top-level FPGA synthesis command (e.g. `synth_ecp5`) infer proper BRAMs,
-	 * which is both faster and more area-efficient than FF expansion.
-	 */
-	private generateOOCScript(
-		component: ComponentInfo,
-		depNetlists: string[],
-		netlistPath: string,
-		diagramJsonPath: string,
-		_options: YosysOptions
-	): string {
-		const moduleDir = path.dirname(netlistPath);
-		const statsJsonPath = path.join(moduleDir, 'stats.json');
-		const ltpPath = path.join(moduleDir, 'logic_depth.txt');
-
-		let script = `# OOC Synthesis: ${component.name}\n\n`;
-
-		for (const netlist of depNetlists) {
-			script += `read_json ${netlist}\n`;
-		}
-		for (const vFile of component.verilogFiles) {
-			script += `read_verilog ${vFile}\n`;
-		}
-
-		script += `\nhierarchy -check -top ${component.name}\n\n`;
-
-		// Run only the passes needed to produce a valid JSON netlist without
-		// expanding memories or running ABC optimisation.  We do NOT use
-		// `synth -run begin:coarse` because Yosys's label semantics mean
-		// proc ends up not running, leaving RTLIL::Process objects that
-		// write_json refuses.  Instead we call each pass explicitly:
-		//
-		//  proc          – convert always-blocks to netlist cells (required
-		//                  before write_json can succeed)
-		//  flatten       – inline submodule hierarchy so the JSON is self-
-		//                  contained
-		//  opt -purge    – remove dead logic
-		//  memory -nomap – collect memory reads/writes into $mem cells but
-		//                  do NOT map to flip-flops (memory_map hangs
-		//                  indefinitely on large RAMs like blockRamU 16 384)
-		//  opt           – final cleanup
-		//
-		// The $mem cells are handled correctly by the top-level FPGA synthesis
-		// command (synth_ecp5, synth_ice40, etc.) which maps them to BRAMs.
-		// FPGA-specific cell definitions must not appear in intermediate JSON
-		// netlists that are re-imported by the parent synthesis pass.
-		script += `proc\nflatten\nopt -purge\nmemory -nomap\nopt\n\n`;
-
-		// Statistics (at $mem / pre-technology-map level)
-		script += `tee -q -o ${statsJsonPath} stat -json\n`;
-		script += `tee -q -o ${ltpPath} ltp -noff\n\n`;
-
-		// Write the synthesis-chain netlist (used by the top-level synthesis)
-		script += `write_json ${netlistPath}\n\n`;
-
-		// Strip timing-only cells before further export.
-		script += `# Strip timing-only cells\n`;
-		script += `delete */t:$specify2 */t:$specify3\n`;
-		script += `opt_clean\n`;
-		script += `clean\n`;
-		script += `write_json ${diagramJsonPath}\n`;
-		// Render diagram as Graphviz dot — converted to SVG by the runner.
-		script += `show -format dot -prefix ${path.join(moduleDir, component.name)} -viewer none -notitle\n`;
-
-		return script;
-	}
-
-	/**
 	 * Run a Yosys script and collect output.
 	 *
 	 * @param timeoutMs - Optional wall-clock timeout in milliseconds.  If
@@ -1191,11 +833,12 @@ export class YosysRunner {
 			const logger = getLogger();
 			// When a logfile is requested, use yosys's native -l option —
 			// it's flushed in real time and survives a crash of this extension.
+			const { cmd: yosysCmd, baseArgs } = resolveYosysCommand();
 			const args = logFile
-				? ['-l', logFile, '-s', scriptPath]
-				: ['-s', scriptPath];
-			const finishLog = logger?.command('yosys', args, cwd);
-			const yosys = spawn('yosys', args, {
+				? [...baseArgs, '-l', logFile, '-s', scriptPath]
+				: [...baseArgs, '-s', scriptPath];
+			const finishLog = logger?.command(yosysCmd, args, cwd);
+			const yosys = spawn(yosysCmd, args, {
 				cwd,
 				env: process.env
 			});
@@ -1203,6 +846,7 @@ export class YosysRunner {
 			let stdout = '';
 			let stderr = '';
 			let resolved = false;
+			let killTimer: ReturnType<typeof setTimeout> | undefined;
 			const warnings: YosysWarning[] = [];
 			const errors: YosysError[] = [];
 
@@ -1210,13 +854,23 @@ export class YosysRunner {
 			// of declaration order (all calls to finish() are async).
 			let timeoutHandle: ReturnType<typeof setTimeout>;
 
+			// SIGTERM first; escalate to SIGKILL if yosys/abc ignores it so
+			// the process doesn't keep burning CPU after we've given up on it.
+			const kill = () => {
+				yosys.kill('SIGTERM');
+				killTimer = setTimeout(() => {
+					if (yosys.exitCode === null) { yosys.kill('SIGKILL'); }
+				}, 5000);
+			};
+
 			// If an abort signal fires, kill the child process.
-			const onAbort = () => { yosys.kill('SIGTERM'); };
+			const onAbort = () => { kill(); };
 
 			const finish = (code: number | null, extraErrors: YosysError[] = []) => {
 				if (resolved) { return; }
 				resolved = true;
 				clearTimeout(timeoutHandle);
+				if (killTimer) { clearTimeout(killTimer); }
 				abortSignal?.removeEventListener('abort', onAbort);
 				finishLog?.then(fn => fn(code));
 				resolve({
@@ -1232,34 +886,43 @@ export class YosysRunner {
 			timeoutHandle = setTimeout(() => {
 				const msg = `Yosys timed out after ${timeoutMs / 1000}s — killing process`;
 				this.outputChannel.appendLine(`\nWARNING: ${msg}`);
-				yosys.kill('SIGTERM');
+				kill();
 				finish(null, [{ message: msg }]);
 			}, timeoutMs);
 
 			if (abortSignal) {
 				if (abortSignal.aborted) {
-					yosys.kill('SIGTERM');
+					kill();
 				} else {
 					abortSignal.addEventListener('abort', onAbort, { once: true });
 				}
 			}
 
+			// Line-buffered so messages straddling chunk boundaries aren't
+			// missed, and so incidental "error" substrings aren't recorded.
+			const splitOut = makeLineSplitter((line) => {
+				if (/^Warning:/i.test(line.trim())) {
+					warnings.push({ message: line.trim() });
+				}
+			});
+			const splitErr = makeLineSplitter((line) => {
+				if (/^ERROR:/.test(line.trim())) {
+					errors.push({ message: line.trim() });
+				}
+			});
+
 			yosys.stdout.on('data', (data) => {
 				const text = data.toString();
 				stdout += text;
 				if (verbose) { this.outputChannel.append(text); }
-				if (/warning:/i.test(text)) {
-					warnings.push({ message: text.trim() });
-				}
+				splitOut(text);
 			});
 
 			yosys.stderr.on('data', (data) => {
 				const text = data.toString();
 				stderr += text;
 				if (verbose) { this.outputChannel.append(text); }
-				if (text.toLowerCase().includes('error')) {
-					errors.push({ message: text.trim() });
-				}
+				splitErr(text);
 			});
 
 			yosys.on('error', (error) => {
@@ -1272,41 +935,4 @@ export class YosysRunner {
 		});
 	}
 
-	/**
-	 * Check if Yosys is available
-	 */
-	static async checkAvailability(
-		outputChannel: vscode.OutputChannel
-	): Promise<boolean> {
-		return new Promise((resolve) => {
-			const check = spawn('yosys', ['--version'], {
-				timeout: 5000
-			});
-
-			let found = false;
-
-			check.stdout.on('data', (data) => {
-				if (data.toString().includes('Yosys')) {
-					found = true;
-				}
-			});
-
-			check.on('close', (code) => {
-				if (!found && code !== 0) {
-					outputChannel.appendLine(
-						'WARNING: Yosys not found in PATH'
-					);
-					outputChannel.appendLine(
-						'Run from within `nix develop` shell or install Yosys'
-					);
-				}
-				resolve(found || code === 0);
-			});
-
-			check.on('error', () => {
-				outputChannel.appendLine('WARNING: Could not check for Yosys');
-				resolve(false);
-			});
-		});
-	}
 }

@@ -86,9 +86,11 @@ suite('Synthesis Targets — getTarget / getDefaultScript', () => {
 		assert.strictEqual(ecp5.synthCommand, 'synth_ecp5');
 	});
 
-	test('getTarget falls back to generic for unknown id', () => {
-		const unknown = getTarget('nonexistent_target');
-		assert.strictEqual(unknown.id, 'generic');
+	test('getTarget throws loudly for unknown id', () => {
+		assert.throws(
+			() => getTarget('nonexistent_target'),
+			/Unknown synthesis target "nonexistent_target"/
+		);
 	});
 
 	test('getDefaultScript returns non-empty script for known target', () => {
@@ -97,10 +99,11 @@ suite('Synthesis Targets — getTarget / getDefaultScript', () => {
 		assert.ok(script.includes('synth_ice40'));
 	});
 
-	test('getDefaultScript returns generic script for unknown target', () => {
-		const script = getDefaultScript('nonexistent');
-		const genericScript = getDefaultScript('generic');
-		assert.strictEqual(script, genericScript);
+	test('getDefaultScript throws loudly for unknown target', () => {
+		assert.throws(
+			() => getDefaultScript('nonexistent'),
+			/Unknown synthesis target "nonexistent"/
+		);
 	});
 });
 
@@ -122,8 +125,9 @@ write_json {outputDir}/{outputBaseName}.json
 			outputDir: '/out',
 			outputBaseName: 'top',
 		});
-		assert.ok(result.includes('read_verilog /path/to/a.v'));
-		assert.ok(result.includes('read_verilog /path/to/b.v'));
+		// Paths are double-quoted so workspaces containing spaces work.
+		assert.ok(result.includes('read_verilog "/path/to/a.v"'));
+		assert.ok(result.includes('read_verilog "/path/to/b.v"'));
 	});
 
 	test('replaces {topModule} in all occurrences', () => {
@@ -167,7 +171,7 @@ write_json {outputDir}/{outputBaseName}.json
 			outputDir: '/out',
 			outputBaseName: 'top',
 		});
-		assert.strictEqual(result, 'read_verilog /only.v');
+		assert.strictEqual(result, 'read_verilog "/only.v"');
 	});
 
 	test('resolves a real default script without leftover placeholders', () => {
@@ -182,7 +186,7 @@ write_json {outputDir}/{outputBaseName}.json
 		assert.ok(!result.includes('{topModule}'), 'Should not contain {topModule}');
 		assert.ok(!result.includes('{outputDir}'), 'Should not contain {outputDir}');
 		assert.ok(!result.includes('{outputBaseName}'), 'Should not contain {outputBaseName}');
-		assert.ok(result.includes('read_verilog /design/top.v'));
+		assert.ok(result.includes('read_verilog "/design/top.v"'));
 		assert.ok(result.includes('synth_ecp5 -top topEntity'));
 	});
 });
