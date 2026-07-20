@@ -17,7 +17,6 @@ src/
   yosys-types.ts            Types for Yosys synthesis results
   nextpnr-runner.ts         nextpnr invocation, timing/utilisation parsing
   nextpnr-types.ts          Types for nextpnr options and results
-  diagram-viewer.ts         DigitalJS webview panel
   toolchain.ts              External tool availability checking
   file-logger.ts            Debug file logging (.clash/debug.log)
   types.ts                  Shared FunctionInfo interface
@@ -72,9 +71,6 @@ User Code (.hs)
        │
        ▼
   NextpnrRunner (PnR → timing)
-       │
-       ▼
-  DiagramViewer (DigitalJS webview)
 ```
 
 ## Extension Activation

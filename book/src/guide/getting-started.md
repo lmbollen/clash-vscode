@@ -56,6 +56,6 @@ Run **Clash: Check Toolchain** from the command palette to verify what is availa
 
 4. **Clash compilation** — Runs `cabal run clash-synth:clash -- ClashSynth_TopEntity --verilog` inside the synth project.
 
-5. **Yosys synthesis** — Runs Yosys with target-specific scripts (generic, iCE40, ECP5, Xilinx). For multi-component designs, sub-modules are synthesized in parallel waves using out-of-context synthesis.
+5. **Yosys synthesis** — Runs Yosys with target-specific scripts (generic, iCE40, ECP5, Xilinx). For multi-component designs with out-of-context mode enabled, each sub-module is synthesized standalone.
 
 6. **Place & route** — Runs nextpnr for the selected device and reports timing and utilisation. The target frequency is parsed from Clash-generated SDC files.

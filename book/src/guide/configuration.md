@@ -5,9 +5,6 @@ All settings live under `clash-toolkit` in VS Code settings.
 | Setting | Default | Description |
 |---------|---------|-------------|
 | `yosysCommand` | `yosys` | Command to invoke Yosys |
-| `outputFormat` | `verilog` | HDL output format (`verilog`, `vhdl`, `systemverilog`) |
-| `autoCleanup` | `false` | Delete temporary wrapper modules after compilation |
-| `showYosysSchematic` | `false` | Open the DigitalJS circuit viewer automatically after Yosys synthesis |
 | `outOfContext` | `false` | Out-of-context synthesis: when enabled, each component in a multi-component design is synthesized standalone with its own diagram + utilization stats |
 
 ## Out-of-Context Synthesis

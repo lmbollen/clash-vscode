@@ -19,19 +19,14 @@ All generated files live under `.clash/` in the workspace root.
         …
     03-yosys/                        Yosys synthesis results
       function_name_synth.v          Synthesized Verilog
-      function_name.json             JSON netlist (for nextpnr / DigitalJS)
+      function_name.json             JSON netlist (for nextpnr)
       synth.ys                       Yosys script
       yosys.log                      Complete Yosys output
       statistics.txt                 Cell/wire statistics
-      ooc/                           Out-of-context sub-module netlists
-        {SubModule}/
-          {SubModule}.json
-          synth.ys
-          yosys.log
       per-module/                    Per-module synthesis outputs
         {Module}/
           {Module}.il                RTLIL
-          {Module}.json              DigitalJS JSON
+          {Module}.json              JSON netlist
           synth.ys
           yosys.log
     04-nextpnr/                      Place & route output

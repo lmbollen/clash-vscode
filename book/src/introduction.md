@@ -2,7 +2,7 @@
 
 > **Community extension** — maintained by [Lucas Bollen](https://github.com/lmbollen) (QBayLogic). Not an official release of the [Clash](https://clash-lang.org/) project.
 
-Synthesize Verilog from Haskell functions using [Clash](https://clash-lang.org/), explore the result with [Yosys](https://yosyshq.net/yosys/), and place-and-route for ECP5 FPGAs with [nextpnr](https://github.com/YosysHQ/nextpnr) — all from inside VS Code.
+Synthesize Verilog from Haskell functions using [Clash](https://clash-lang.org/), explore the result with [Yosys](https://yosyshq.net/yosys/), and place-and-route for ECP5, iCE40, and Gowin FPGAs with [nextpnr](https://github.com/YosysHQ/nextpnr) — all from inside VS Code.
 
 The extension integrates with **Haskell Language Server** (HLS) to find functions in your Clash project, determines which ones are monomorphic (and therefore synthesisable), then drives the full hardware workflow:
 
@@ -10,7 +10,7 @@ The extension integrates with **Haskell Language Server** (HLS) to find function
 Haskell source → Clash (Verilog) → Yosys (synthesis) → nextpnr (place & route)
 ```
 
-At every stage you can inspect output, view statistics, and open an interactive circuit diagram powered by DigitalJS.
+At every stage you can inspect output, view statistics, and open a schematic diagram rendered via Graphviz.
 
 ## Feature Highlights
 
@@ -18,7 +18,6 @@ At every stage you can inspect output, view statistics, and open an interactive 
 - **Code actions** — press `Ctrl+.` on a function to synthesize it directly
 - **Optional out-of-context synthesis** — synthesize each module standalone for individual diagrams + utilization
 - **SDC frequency parsing** — reads Clash-generated `.sdc` files for target clock frequency
-- **Parallel OOC synthesis** — sub-modules synthesized in parallel waves
-- **Interactive circuit viewer** — DigitalJS-based pan/zoom schematic in a webview
-- **Full PnR flow** — ECP5 place & route with timing analysis and utilization reports
+- **Schematic diagrams** — Graphviz-rendered SVG schematic per synthesis run
+- **Full PnR flow** — ECP5 / iCE40 / Gowin place & route with timing analysis and utilization reports
 - **Debug logging** — all tool invocations logged to `.clash/debug.log`

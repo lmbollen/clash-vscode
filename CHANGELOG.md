@@ -13,10 +13,10 @@ Initial public release.
 - Function detection in Haskell sources via Haskell Language Server.
 - Code actions and command palette entries to synthesize a selected function.
 - Clash → Verilog generation through `cabal run clash-synth:clash`.
-- Yosys synthesis for eight target families (generic, ice40, ecp5, xilinx, gowin, intel, quicklogic, sf2).
-- Whole-design and per-module synthesis modes; parallel out-of-context (OOC) synthesis for sub-modules.
-- Interactive DigitalJS-based circuit viewer.
-- nextpnr place-and-route flow for ECP5 (with optional routed-layout SVG).
-- Synthesis results tree view and standalone results panel.
+- Yosys synthesis for seven target families (generic, ice40, ecp5, xilinx, gowin, quicklogic, sf2).
+- Whole-design and per-module synthesis modes.
+- Graphviz-rendered schematic diagrams (SVG) per synthesis run.
+- nextpnr place-and-route flow for ECP5, iCE40, and Gowin (with optional routed-layout SVG).
+- Synthesis results and run history tree views.
 - Configurable Yosys scripts per target with placeholder substitution.
 - Toolchain check command to verify external tool availability.
