@@ -2,26 +2,39 @@ import * as path from 'path';
 import { promises as fs } from 'fs';
 
 /**
- * File-based logger for debugging crashes
- * Writes synchronously to ensure logs are captured even if VS Code crashes
+ * File-based logger for debugging crashes.
+ * Appends asynchronously; the previous session's log is rotated to
+ * debug.log.old on activation so crash evidence survives the extension
+ * host restarting after a crash.
  */
 export class FileLogger {
     private logFilePath: string;
     private enabled: boolean = true;
+    /** Resolves once the log directory/file exist; every write awaits this
+     *  so entries logged right after construction aren't lost to the race
+     *  with mkdir/initial write. */
+    private ready: Promise<void>;
 
     constructor(workspaceRoot: string) {
         this.logFilePath = path.join(workspaceRoot, '.clash', 'debug.log');
-        this.init();
+        this.ready = this.init();
     }
 
-    private async init() {
+    private async init(): Promise<void> {
         try {
             // Ensure .clash directory exists
             await fs.mkdir(path.dirname(this.logFilePath), { recursive: true });
-            // Create/truncate log file on start
+            // Keep the previous session's log: VS Code restarts the extension
+            // host after a crash, so truncating here would destroy the log at
+            // exactly the moment it is needed. Rotate it aside instead.
+            try {
+                await fs.rename(this.logFilePath, `${this.logFilePath}.old`);
+            } catch { /* no previous log — nothing to rotate */ }
             const timestamp = new Date().toISOString();
-            await fs.writeFile(this.logFilePath, `=== Clash VS Code Extension Debug Log ===\n`);
-            await this.appendToFile(`Started: ${timestamp}\n\n`);
+            await fs.writeFile(
+                this.logFilePath,
+                `=== Clash VS Code Extension Debug Log ===\nStarted: ${timestamp}\n\n`
+            );
             this.enabled = true;
         } catch (error) {
             console.error('Failed to initialize file logger:', error);
@@ -30,6 +43,7 @@ export class FileLogger {
     }
 
     private async appendToFile(message: string): Promise<void> {
+        await this.ready;
         if (!this.enabled) {
             return;
         }
