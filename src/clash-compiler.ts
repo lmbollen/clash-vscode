@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import { spawn, SpawnOptions } from 'child_process';
+import { spawn } from 'child_process';
 import * as path from 'path';
 import { promises as fs, createWriteStream, WriteStream } from 'fs';
 import { ClashManifestParser } from './clash-manifest-parser';
@@ -37,6 +37,8 @@ export interface ClashCompilationOptions {
 	 *  When set, the compiler passes --project-dir and --project-file so
 	 *  that relative paths in the imported cabal.project resolve correctly. */
 	cabalProjectDir?: string;
+	/** Abort signal — cancels the build by killing the cabal process. */
+	abortSignal?: AbortSignal;
 }
 
 /**
@@ -52,111 +54,6 @@ export class ClashCompiler {
 
 	constructor(private outputChannel: vscode.OutputChannel) {
 		this.manifestParser = new ClashManifestParser();
-	}
-
-	/**
-	 * Validate that the Clash command works by running it with --version
-	 * @param workspaceRoot Optional workspace root to run validation in (important for direnv)
-	 */
-	async validateCommand(workspaceRoot?: string): Promise<{ success: boolean; message: string; output?: string }> {
-		const command = ClashCompiler.CLASH_COMMAND;
-		const args = [...ClashCompiler.CLASH_BASE_ARGS, '--version'];
-		
-		return new Promise((resolve) => {
-			// Run in workspace directory if provided (important for direnv/nix-shell)
-			const spawnOptions: SpawnOptions = {
-				timeout: 10000
-			};
-			if (workspaceRoot) {
-				spawnOptions.cwd = workspaceRoot;
-			}
-			
-			const logger = getLogger();
-			const finishLog = logger?.command(command, args, workspaceRoot);
-			const process = spawn(command, args, spawnOptions);
-
-			let stdout = '';
-			let stderr = '';
-
-			process.stdout?.on('data', (data) => {
-				stdout += data.toString();
-			});
-
-			process.stderr?.on('data', (data) => {
-				stderr += data.toString();
-			});
-			
-			process.on('close', async (code) => {
-				finishLog?.then(fn => fn(code));
-				const output = stdout + stderr;
-				// Consider it successful if:
-				// 1. Exit code is 0, OR
-				// 2. Output contains version/clash info (even if exit code is non-zero)
-				//    This handles cases where --version prints to stderr and returns non-zero
-				const hasVersionOutput = output.toLowerCase().includes('clash') || 
-				                         output.toLowerCase().includes('version') ||
-				                         output.includes('GHC');
-				
-				if (code === 0 || hasVersionOutput) {
-					resolve({
-						success: true,
-						message: `Clash command validated: ${command} ${args.join(' ')}`,
-						output: output.trim()
-					});
-				} else {
-					resolve({
-						success: false,
-						message: `Clash command validation failed (exit code ${code}). Make sure cabal and clash-ghc are available.`,
-						output: output.trim()
-					});
-				}
-			});
-			
-			process.on('error', (error) => {
-				resolve({
-					success: false,
-					message: `Failed to spawn: ${error.message}`,
-					output: error.message
-				});
-			});
-		});
-	}
-
-	/**
-	 * Run `cabal build clash-synth:clash` and return true when the output
-	 * contains "Up to date", meaning no source files (including transitive
-	 * dependencies) have changed since the last build.
-	 *
-	 * This is much more reliable than monitoring individual file saves, which
-	 * misses edits to dependency packages.
-	 */
-	async isUpToDate(options: {
-		workspaceRoot: string;
-		synthProjectRoot: string;
-		cabalProjectDir?: string;
-	}): Promise<boolean> {
-		const args = ['build', 'clash-synth:clash'];
-		let cwd: string;
-
-		if (options.cabalProjectDir) {
-			args.push(`--project-dir=${options.cabalProjectDir}`);
-			args.push(`--project-file=${path.join(options.synthProjectRoot, 'cabal.project')}`);
-			cwd = options.cabalProjectDir;
-		} else {
-			cwd = options.synthProjectRoot;
-		}
-
-		return new Promise((resolve) => {
-			const proc = spawn('cabal', args, { cwd, env: process.env });
-			let output = '';
-
-			proc.stdout?.on('data', (d) => { output += d.toString(); });
-			proc.stderr?.on('data', (d) => { output += d.toString(); });
-			proc.on('error', () => resolve(false));
-			proc.on('close', (code) => {
-				resolve(code === 0 && /Up to date/i.test(output));
-			});
-		});
 	}
 
 	/**
@@ -181,17 +78,17 @@ export class ClashCompiler {
 
 		// Determine HDL output directory
 		const hdlDir = options.hdlDir || path.join(options.outputDir, 'verilog');
-		
+
 		// Get Clash command
 		const command = ClashCompiler.CLASH_COMMAND;
 		const baseArgs = [...ClashCompiler.CLASH_BASE_ARGS];
-		
+
 		// Determine cwd and extra args depending on whether we have a
 		// synthesis cabal project.
 		let cwd: string;
 		const cabalFlags: string[] = [];  // cabal-level flags (before subcommand)
 		const extraArgs: string[] = [];   // GHC/Clash flags (after --)
-		
+
 		if (options.synthProjectRoot) {
 			if (options.cabalProjectDir) {
 				// Run with --project-dir pointing at the user's project root
@@ -214,7 +111,7 @@ export class ClashCompiler {
 			const wrapperDir = path.dirname(wrapperPath);
 			extraArgs.push(`-i${wrapperDir}`);
 		}
-		
+
 		// Build Clash command arguments — use module name, not file path
 		// cabalFlags go before subcommand; extraArgs go after --
 		const args = [
@@ -258,8 +155,31 @@ export class ClashCompiler {
 
 			let stdout = '';
 			let stderr = '';
+			let settled = false;
+			let killTimer: ReturnType<typeof setTimeout> | undefined;
 			const errors: string[] = [];
 			const warnings: string[] = [];
+
+			// Cancellation: kill cabal with SIGTERM, escalate to SIGKILL if
+			// it ignores the request (e.g. mid-GHC-compilation).
+			const onAbort = () => {
+				if (settled) { return; }
+				this.outputChannel.appendLine('\nCancelled — terminating cabal/Clash build');
+				clash.kill('SIGTERM');
+				killTimer = setTimeout(() => {
+					if (!settled && clash.exitCode === null) { clash.kill('SIGKILL'); }
+				}, 5000);
+			};
+			if (options.abortSignal?.aborted) {
+				onAbort();
+			} else {
+				options.abortSignal?.addEventListener('abort', onAbort, { once: true });
+			}
+			const cleanup = () => {
+				settled = true;
+				if (killTimer) { clearTimeout(killTimer); }
+				options.abortSignal?.removeEventListener('abort', onAbort);
+			};
 
 			clash.stdout.on('data', (data) => {
 				const text = data.toString();
@@ -284,6 +204,7 @@ export class ClashCompiler {
 			});
 
 			clash.on('error', (error) => {
+				cleanup();
 				this.outputChannel.appendLine(`\nERROR: Failed to spawn Clash command: ${error.message}`);
 				this.outputChannel.appendLine(`Command: ${command} ${args.join(' ')}`);
 				logStream?.end(`\nERROR: ${error.message}\n`);
@@ -296,63 +217,75 @@ export class ClashCompiler {
 			});
 
 			clash.on('close', async (code) => {
+				cleanup();
 				finishLog?.then(fn => fn(code));
 				logStream?.end(`\n${'='.repeat(60)}\nExit code: ${code}\n`);
 				this.outputChannel.appendLine('');
 				this.outputChannel.appendLine(`Clash exited with code ${code}`);
-				
+
+				if (options.abortSignal?.aborted) {
+					resolve({
+						success: false,
+						errors: ['Compilation cancelled'],
+						warnings,
+						output: stdout + stderr
+					});
+					return;
+				}
+
 				if (code === 0) {
 					this.outputChannel.appendLine('✓ Compilation successful');
-					
+
 					// Find generated Verilog file
-					const verilogPath = await this.findGeneratedVerilog(
-						hdlDir,
-						options.moduleName
-					);
-					
-					if (verilogPath) {
-						this.outputChannel.appendLine(`✓ Generated Verilog: ${verilogPath}`);
-						
-						// Try to find and parse the manifest
-						let manifest: ParsedClashManifest | undefined;
-						let allVerilogFiles: string[] | undefined;
-						
-						try {
-							const verilogDir = path.dirname(verilogPath);
-							const manifestPath = await this.manifestParser.findManifest(verilogDir);
-							
-							if (manifestPath) {
-								this.outputChannel.appendLine(`✓ Found manifest: ${manifestPath}`);
-								manifest = await this.manifestParser.parseManifest(manifestPath);
-								
-								// Collect all Verilog files including dependencies
-								allVerilogFiles = await this.manifestParser.collectAllVerilogFiles(manifestPath);
-								
-								this.outputChannel.appendLine(`✓ Collected ${allVerilogFiles.length} Verilog file(s):`);
-								allVerilogFiles.forEach(f => {
-									this.outputChannel.appendLine(`  - ${path.basename(f)}`);
-								});
-								
-								// Display useful manifest info
-								if (manifest.targetFrequencyMHz) {
-									this.outputChannel.appendLine(`✓ Target frequency: ${manifest.targetFrequencyMHz.toFixed(2)} MHz (from ${manifest.primaryDomain} domain)`);
-								}
-								
-								const { clocks, resets } = this.manifestParser.getClockResetPorts(manifest);
-								if (clocks.length > 0) {
-									this.outputChannel.appendLine(`✓ Clock signals: ${clocks.join(', ')}`);
-								}
-								if (resets.length > 0) {
-									this.outputChannel.appendLine(`✓ Reset signals: ${resets.join(', ')}`);
-								}
-							} else {
-								this.outputChannel.appendLine('⚠ No manifest found, will use basic file discovery');
-							}
-						} catch (err) {
-							this.outputChannel.appendLine(`⚠ Failed to parse manifest: ${err}`);
-							// Continue anyway, manifest is optional
+					// The manifest is the single source of truth for the
+					// generated design — locating outputs by directory-listing
+					// heuristics would silently mask a broken Clash run, so any
+					// missing piece here is a loud failure.
+					try {
+						// Clash generates: hdlDir/ModuleName.topEntity/{t_name}.v
+						// where t_name comes from the Synthesize annotation.
+						const moduleDir = path.join(hdlDir, `${options.moduleName}.topEntity`);
+						const manifestPath = await this.manifestParser.findManifest(moduleDir);
+						if (!manifestPath) {
+							throw new Error(
+								`No clash-manifest.json in ${moduleDir} — Clash reported success ` +
+								'but did not produce a manifest; cannot locate the generated design.'
+							);
 						}
-						
+						this.outputChannel.appendLine(`✓ Found manifest: ${manifestPath}`);
+						const manifest = await this.manifestParser.parseManifest(manifestPath);
+
+						const verilogPath = path.join(moduleDir, `${manifest.top_component.name}.v`);
+						try {
+							await fs.access(verilogPath);
+						} catch {
+							throw new Error(
+								`Manifest names top component "${manifest.top_component.name}" ` +
+								`but ${verilogPath} does not exist.`
+							);
+						}
+						this.outputChannel.appendLine(`✓ Generated Verilog: ${verilogPath}`);
+
+						// Collect all Verilog files including dependencies
+						const allVerilogFiles = await this.manifestParser.collectAllVerilogFiles(manifestPath);
+						this.outputChannel.appendLine(`✓ Collected ${allVerilogFiles.length} Verilog file(s):`);
+						allVerilogFiles.forEach(f => {
+							this.outputChannel.appendLine(`  - ${path.basename(f)}`);
+						});
+
+						// Display useful manifest info
+						if (manifest.targetFrequencyMHz) {
+							this.outputChannel.appendLine(`✓ Target frequency: ${manifest.targetFrequencyMHz.toFixed(2)} MHz (from ${manifest.primaryDomain} domain)`);
+						}
+
+						const { clocks, resets } = this.manifestParser.getClockResetPorts(manifest);
+						if (clocks.length > 0) {
+							this.outputChannel.appendLine(`✓ Clock signals: ${clocks.join(', ')}`);
+						}
+						if (resets.length > 0) {
+							this.outputChannel.appendLine(`✓ Reset signals: ${resets.join(', ')}`);
+						}
+
 						resolve({
 							success: true,
 							verilogPath,
@@ -362,11 +295,12 @@ export class ClashCompiler {
 							warnings,
 							output: stdout + stderr
 						});
-					} else {
-						this.outputChannel.appendLine('✗ Could not find generated Verilog file');
+					} catch (err) {
+						const message = err instanceof Error ? err.message : String(err);
+						this.outputChannel.appendLine(`✗ ${message}`);
 						resolve({
 							success: false,
-							errors: ['Generated Verilog file not found'],
+							errors: [message],
 							warnings,
 							output: stdout + stderr
 						});
@@ -385,54 +319,6 @@ export class ClashCompiler {
 	}
 
 	/**
-	 * Find the generated Verilog file in the HDL directory
-	 */
-	private async findGeneratedVerilog(
-		hdlDir: string,
-		moduleName: string
-	): Promise<string | undefined> {
-		try {
-			// Clash generates: hdlDir/ModuleName.topEntity/{t_name}.v
-			// where t_name comes from the Synthesize annotation
-			const moduleDir = path.join(hdlDir, `${moduleName}.topEntity`);
-			
-			// List all files in the directory
-			const files = await fs.readdir(moduleDir);
-			
-			// Find the main Verilog file (exclude _types.v, _shim.cpp, etc.)
-			const verilogFiles = files.filter(f => 
-				f.endsWith('.v') && 
-				!f.endsWith('_types.v') &&
-				!f.includes('testbench')
-			);
-			
-			if (verilogFiles.length > 0) {
-				// Return the first (and usually only) main Verilog file
-				return path.join(moduleDir, verilogFiles[0]);
-			}
-			
-			return undefined;
-		} catch {
-			// Try legacy/alternate locations as fallback
-			try {
-				// Old format: hdlDir/ModuleName/topEntity.v
-				const legacyPath = path.join(hdlDir, moduleName, 'topEntity.v');
-				await fs.access(legacyPath);
-				return legacyPath;
-			} catch {
-				// Direct file: hdlDir/ModuleName.v
-				try {
-					const directPath = path.join(hdlDir, `${moduleName}.v`);
-					await fs.access(directPath);
-					return directPath;
-				} catch {
-					return undefined;
-				}
-			}
-		}
-	}
-
-	/**
 	 * Parse Clash error messages and create diagnostics
 	 */
 	parseDiagnostics(
@@ -440,33 +326,38 @@ export class ClashCompiler {
 		wrapperPath: string
 	): vscode.Diagnostic[] {
 		const diagnostics: vscode.Diagnostic[] = [];
-		
-		// Match Clash error format:
-		// path/file.hs:line:col: error:
-		const errorRegex = /([^:]+):(\d+):(\d+):\s*(error|warning):\s*(.+?)(?=\n[^\s]|\n*$)/gs;
-		
+
+		// Match GHC/Clash error locations in all three formats:
+		//   path/file.hs:12:5: error:            (point)
+		//   path/file.hs:12:5-8: error:          (column span)
+		//   path/file.hs:(12,5)-(14,10): error:  (block span)
+		const errorRegex =
+			/([^\n:][^\n]*?):(?:(\d+):(\d+)(?:-\d+)?|\((\d+),(\d+)\)-\(\d+,\d+\)):\s*(error|warning):\s*(.+?)(?=\n[^\s]|\n*$)/gs;
+
 		let match;
 		while ((match = errorRegex.exec(output)) !== null) {
-			const [, filePath, lineStr, colStr, severity, message] = match;
-			
+			const [, filePath, pointLine, pointCol, spanLine, spanCol, severity, message] = match;
+			const lineStr = pointLine ?? spanLine;
+			const colStr = pointCol ?? spanCol;
+
 			// Only create diagnostics for the wrapper file
 			if (filePath.includes(path.basename(wrapperPath))) {
 				const line = parseInt(lineStr, 10) - 1; // VS Code uses 0-based
 				const col = parseInt(colStr, 10) - 1;
-				
+
 				const diagnostic = new vscode.Diagnostic(
 					new vscode.Range(line, col, line, col + 10),
 					message.trim(),
-					severity === 'error' 
-						? vscode.DiagnosticSeverity.Error 
+					severity === 'error'
+						? vscode.DiagnosticSeverity.Error
 						: vscode.DiagnosticSeverity.Warning
 				);
-				
+
 				diagnostic.source = 'Clash';
 				diagnostics.push(diagnostic);
 			}
 		}
-		
+
 		return diagnostics;
 	}
 }

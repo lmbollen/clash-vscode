@@ -5,6 +5,15 @@ import { ClashCodeActionProvider } from '../../clash-code-actions';
 import { FunctionDetector } from '../../function-detector';
 import { HLSClient } from '../../hls-client';
 
+/** Minimal CodeActionContext for driving the provider directly. */
+function codeActionContext(): vscode.CodeActionContext {
+	return {
+		diagnostics: [],
+		only: undefined,
+		triggerKind: vscode.CodeActionTriggerKind.Invoke,
+	};
+}
+
 /**
  * Tests for Clash code action provider (Ctrl+.)
  */
@@ -46,7 +55,9 @@ suite('Code Action Provider', () => {
 		});
 
 		const range = new vscode.Range(0, 0, 0, 0);
-		const actions = await provider.provideCodeActions(doc, range);
+		const actions = await provider.provideCodeActions(
+			doc, range, codeActionContext(), new vscode.CancellationTokenSource().token
+		);
 
 		assert.ok(Array.isArray(actions), 'Should return an array');
 		assert.strictEqual(actions.length, 0, 'Should return no actions for plaintext');
@@ -83,7 +94,9 @@ suite('Code Action Provider', () => {
 
 		// Try to get actions at line 0 — might detect topEntity
 		const range = new vscode.Range(0, 0, doc.lineCount - 1, 0);
-		const actions = await provider.provideCodeActions(doc, range);
+		const actions = await provider.provideCodeActions(
+			doc, range, codeActionContext(), new vscode.CancellationTokenSource().token
+		);
 
 		// If HLS found monomorphic functions, verify command structure
 		const validCommands = new Set([

@@ -14,10 +14,17 @@ export class ClashCodeActionProvider implements vscode.CodeActionProvider {
 
 	async provideCodeActions(
 		document: vscode.TextDocument,
-		range: vscode.Range | vscode.Selection
+		range: vscode.Range | vscode.Selection,
+		_context: vscode.CodeActionContext,
+		token: vscode.CancellationToken
 	): Promise<vscode.CodeAction[]> {
 		// Use the targeted single-symbol lookup — safe to call on every cursor move.
 		const func = await this.functionDetector.getFunctionAtPosition(document, range.start);
+		// Rapid cursor movement supersedes this request — don't build actions
+		// from a stale position.
+		if (token.isCancellationRequested) {
+			return [];
+		}
 		if (!func || !func.isMonomorphic) {
 			return [];
 		}

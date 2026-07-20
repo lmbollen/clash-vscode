@@ -14,6 +14,19 @@ export class ClashManifestParser {
 		const content = await fs.readFile(manifestPath, 'utf8');
 		const manifest: ClashManifest = JSON.parse(content);
 
+		// Validate the shape before consumers dereference into it — a
+		// truncated write or schema drift across Clash versions should
+		// surface as a clear message, not a TypeError deep in a caller.
+		const missing = ['files', 'domains', 'components', 'top_component']
+			.filter(field => (manifest as unknown as Record<string, unknown>)[field] === undefined);
+		if (!Array.isArray(manifest.files) || !Array.isArray(manifest.components) || missing.length > 0) {
+			throw new Error(
+				`Manifest ${manifestPath} is missing or has malformed fields: ` +
+				`${missing.length > 0 ? missing.join(', ') : 'files/components must be arrays'}. ` +
+				'It may be truncated or produced by an unsupported Clash version.'
+			);
+		}
+
 		// Extract directory
 		const directory = path.dirname(manifestPath);
 
@@ -219,21 +232,7 @@ export class ClashManifestParser {
 			extraFilesFor.set(name, extras);
 		}
 
-		// Topological sort (Kahn's algorithm) — leaves first, top last
-		const inDegree = new Map<string, number>();
-		for (const name of manifest.components) {
-			inDegree.set(name, 0);
-		}
-		for (const [, d] of deps) {
-			for (const dep of d) {
-				inDegree.set(dep, (inDegree.get(dep) || 0) + 1);
-			}
-		}
-
-		// Note: inDegree here counts how many modules *depend on* a module
-		// (reverse edges).  We want leaves first (modules nobody depends on
-		// in the reverse sense — i.e. modules that have no deps themselves).
-		// Easier: use a simple iterative approach like buildSynthesisWaves.
+		// Topological sort — leaves first, top last, via simple iteration.
 		const result: ComponentInfo[] = [];
 		const completed = new Set<string>();
 		const remaining = new Set(manifest.components);
