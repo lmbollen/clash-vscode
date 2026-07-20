@@ -221,26 +221,6 @@
           "default": "yosys",
           "description": "Command to run Yosys"
         },
-        "clash-toolkit.outputFormat": {
-          "type": "string",
-          "enum": [
-            "verilog",
-            "vhdl",
-            "systemverilog"
-          ],
-          "default": "verilog",
-          "description": "HDL output format for Clash"
-        },
-        "clash-toolkit.autoCleanup": {
-          "type": "boolean",
-          "default": false,
-          "description": "Automatically cleanup temporary synthesis files"
-        },
-        "clash-toolkit.showYosysSchematic": {
-          "type": "boolean",
-          "default": false,
-          "description": "Show schematic visualization after Yosys synthesis"
-        },
         "clash-toolkit.outOfContext": {
           "type": "boolean",
           "default": false,
@@ -364,8 +344,5 @@
     "glob": "^10.5.0",
     "mocha": "^10.8.2",
     "typescript": "^5.4.0"
-  },
-  "dependencies": {
-    "vscode-languageclient": "^9.0.1"
   }
 }

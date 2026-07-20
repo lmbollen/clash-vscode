@@ -41,15 +41,6 @@ export class HaskellFunctionsTreeProvider
         this._onDidChangeTreeData.fire(undefined);
     }
 
-    /** Called when no Haskell file is active. */
-    clear(): void {
-        this.loading = false;
-        this.fileName = undefined;
-        this.mono = [];
-        this.poly = [];
-        this._onDidChangeTreeData.fire(undefined);
-    }
-
     getTreeItem(element: FunctionTreeNode): vscode.TreeItem {
         return element;
     }
