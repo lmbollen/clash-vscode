@@ -61,56 +61,77 @@ export class SynthesisSettingsPanel {
 		SynthesisSettingsPanel.messageListener = panel.webview.onDidReceiveMessage(
 			async (message) => {
 				const cfg = vscode.workspace.getConfiguration('clash-toolkit');
-				switch (message.type) {
-					case 'changeTarget': {
-						await cfg.update('synthesisTarget', message.targetId, vscode.ConfigurationTarget.Workspace);
-						// sendState will be triggered by the config change listener
-						break;
-					}
-					case 'saveScript': {
-						const targetId = message.targetId as string;
-						const script = message.script as string;
-						const defaultScript = getDefaultScript(targetId);
-						// If identical to default, clear the override
-						if (script.trim() === defaultScript.trim()) {
+				try {
+					switch (message.type) {
+						case 'changeTarget': {
+							await cfg.update('synthesisTarget', message.targetId, vscode.ConfigurationTarget.Workspace);
+							// sendState will be triggered by the config change listener
+							break;
+						}
+						case 'saveScript': {
+							const targetId = message.targetId as string;
+							const script = message.script as string;
+							const defaultScript = getDefaultScript(targetId);
+							// If identical to default, clear the override
+							if (script.trim() === defaultScript.trim()) {
+								await cfg.update(`synthesisScript.${targetId}`, undefined, vscode.ConfigurationTarget.Workspace);
+							} else {
+								await cfg.update(`synthesisScript.${targetId}`, script, vscode.ConfigurationTarget.Workspace);
+							}
+							// The webview flashes "Saved" only on this confirmation,
+							// not optimistically — cfg.update can fail (e.g. no
+							// workspace open).
+							panel.webview.postMessage({ type: 'saveResult', section: 'script', ok: true });
+							break;
+						}
+						case 'resetScript': {
+							const targetId = message.targetId as string;
 							await cfg.update(`synthesisScript.${targetId}`, undefined, vscode.ConfigurationTarget.Workspace);
-						} else {
-							await cfg.update(`synthesisScript.${targetId}`, script, vscode.ConfigurationTarget.Workspace);
+							break;
 						}
-						break;
-					}
-					case 'resetScript': {
-						const targetId = message.targetId as string;
-						await cfg.update(`synthesisScript.${targetId}`, undefined, vscode.ConfigurationTarget.Workspace);
-						break;
-					}
-					case 'saveElaborationScript': {
-						const script = message.script as string;
-						const defaultScript = getDefaultElaborationScript();
-						if (script.trim() === defaultScript.trim()) {
+						case 'saveElaborationScript': {
+							const script = message.script as string;
+							const defaultScript = getDefaultElaborationScript();
+							if (script.trim() === defaultScript.trim()) {
+								await cfg.update('elaborationScript', undefined, vscode.ConfigurationTarget.Workspace);
+							} else {
+								await cfg.update('elaborationScript', script, vscode.ConfigurationTarget.Workspace);
+							}
+							panel.webview.postMessage({ type: 'saveResult', section: 'elab', ok: true });
+							break;
+						}
+						case 'resetElaborationScript': {
 							await cfg.update('elaborationScript', undefined, vscode.ConfigurationTarget.Workspace);
-						} else {
-							await cfg.update('elaborationScript', script, vscode.ConfigurationTarget.Workspace);
+							break;
 						}
-						break;
+						case 'changeOutOfContext': {
+							await cfg.update('outOfContext', message.outOfContext, vscode.ConfigurationTarget.Workspace);
+							break;
+						}
+						case 'ready': {
+							SynthesisSettingsPanel.sendState(panel);
+							SynthesisSettingsPanel.refreshTools(panel);
+							break;
+						}
+						case 'refreshTools': {
+							SynthesisSettingsPanel.refreshTools(panel);
+							break;
+						}
 					}
-					case 'resetElaborationScript': {
-						await cfg.update('elaborationScript', undefined, vscode.ConfigurationTarget.Workspace);
-						break;
+				} catch (err) {
+					// cfg.update rejects when there is no workspace to write to,
+					// among other causes — surface it instead of losing the save.
+					const detail = err instanceof Error ? err.message : String(err);
+					vscode.window.showErrorMessage(`Failed to update Clash settings: ${detail}`);
+					if (message.type === 'saveScript' || message.type === 'saveElaborationScript') {
+						panel.webview.postMessage({
+							type: 'saveResult',
+							section: message.type === 'saveScript' ? 'script' : 'elab',
+							ok: false,
+						});
 					}
-					case 'changeOutOfContext': {
-						await cfg.update('outOfContext', message.outOfContext, vscode.ConfigurationTarget.Workspace);
-						break;
-					}
-					case 'ready': {
-						SynthesisSettingsPanel.sendState(panel);
-						SynthesisSettingsPanel.refreshTools(panel);
-						break;
-					}
-					case 'refreshTools': {
-						SynthesisSettingsPanel.refreshTools(panel);
-						break;
-					}
+					// Re-send the persisted state so the UI reflects reality.
+					SynthesisSettingsPanel.sendState(panel);
 				}
 			}
 		);
@@ -137,24 +158,49 @@ export class SynthesisSettingsPanel {
 	private static async refreshTools(panel: vscode.WebviewPanel): Promise<void> {
 		const tc = SynthesisSettingsPanel.toolchain;
 		if (!tc) { return; }
-		panel.webview.postMessage({ type: 'toolsLoading' });
-		tc.clearCache();
-		const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-		await tc.checkAll(cwd);
-		const statuses = tc.snapshotStatuses();
-		const tools = TOOL_DEFINITIONS.map((def, i) => ({
-			id: def.id,
-			label: def.label,
-			description: def.description,
-			available: statuses[i].available,
-			version: statuses[i].version,
-			toolPath: statuses[i].path,
-			error: statuses[i].error,
-		}));
-		panel.webview.postMessage({ type: 'tools', tools });
+		try {
+			panel.webview.postMessage({ type: 'toolsLoading' });
+			tc.clearCache();
+			const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+			await tc.checkAll(cwd);
+			// The user may close the panel while the probes run — posting to a
+			// disposed webview throws.
+			if (SynthesisSettingsPanel.currentPanel !== panel) { return; }
+			const statuses = tc.snapshotStatuses();
+			const tools = TOOL_DEFINITIONS.map((def, i) => ({
+				id: def.id,
+				label: def.label,
+				description: def.description,
+				available: statuses[i].available,
+				version: statuses[i].version,
+				toolPath: statuses[i].path,
+				error: statuses[i].error,
+			}));
+			panel.webview.postMessage({ type: 'tools', tools });
+		} catch {
+			// Callers fire-and-forget this method; never reject, and never
+			// leave the refresh button stuck spinning on a live panel.
+			if (SynthesisSettingsPanel.currentPanel === panel) {
+				try {
+					panel.webview.postMessage({ type: 'tools', tools: [] });
+				} catch { /* panel disposed mid-error — nothing to unstick */ }
+			}
+		}
 	}
 
 	private static sendState(panel: vscode.WebviewPanel): void {
+		try {
+			SynthesisSettingsPanel.sendStateUnsafe(panel);
+		} catch (err) {
+			// e.g. a stale/unknown synthesisTarget in workspace settings makes
+			// getDefaultScript throw — surface it loudly instead of leaving the
+			// panel silently un-updated (or crashing a config listener).
+			const detail = err instanceof Error ? err.message : String(err);
+			vscode.window.showErrorMessage(`Clash settings panel: ${detail}`);
+		}
+	}
+
+	private static sendStateUnsafe(panel: vscode.WebviewPanel): void {
 		const cfg = vscode.workspace.getConfiguration('clash-toolkit');
 		const targetId = cfg.get<string>('synthesisTarget', 'generic');
 		const outOfContext = cfg.get<boolean>('outOfContext', false);
@@ -327,6 +373,7 @@ export class SynthesisSettingsPanel {
     transition: opacity 0.2s;
   }
   .saved-msg.show { opacity: 1; }
+  .saved-msg.error { color: var(--vscode-testing-iconFailed, #f14c4c); }
 
   /* ── Diff section ── */
   .diff-section {
@@ -639,6 +686,11 @@ let currentDefault = '';
 let savedTimer = null;
 let elabCurrentDefault = '';
 let elabSavedTimer = null;
+// Unsaved-edit flags: while set, state pushes from the extension host must
+// not overwrite the corresponding textarea (any clash-toolkit config change
+// re-sends state, e.g. toggling the out-of-context checkbox).
+let editorDirty = false;
+let elabEditorDirty = false;
 
 // ── Target change ───────────────────────────────────────────────────────
 
@@ -655,6 +707,7 @@ document.getElementById('out-of-context').addEventListener('change', function() 
 const editor = document.getElementById('script-editor');
 
 editor.addEventListener('input', function() {
+  editorDirty = true;
   updateModifiedState();
 });
 
@@ -666,6 +719,7 @@ editor.addEventListener('keydown', function(e) {
     const end = this.selectionEnd;
     this.value = this.value.substring(0, start) + '  ' + this.value.substring(end);
     this.selectionStart = this.selectionEnd = start + 2;
+    editorDirty = true;
     updateModifiedState();
   }
 });
@@ -689,15 +743,12 @@ function saveScript() {
     targetId: currentTargetId,
     script: editor.value,
   });
-
-  // Flash "Saved" message
-  const msg = document.getElementById('saved-msg');
-  msg.classList.add('show');
-  clearTimeout(savedTimer);
-  savedTimer = setTimeout(() => msg.classList.remove('show'), 2000);
+  // "Saved" is flashed when the host confirms with a saveResult message —
+  // not optimistically, since the config write can fail.
 }
 
 function resetScript() {
+  editorDirty = false;
   vscode.postMessage({ type: 'resetScript', targetId: currentTargetId });
 }
 
@@ -706,6 +757,7 @@ function resetScript() {
 const elabEditor = document.getElementById('elab-script-editor');
 
 elabEditor.addEventListener('input', function() {
+  elabEditorDirty = true;
   updateElabModifiedState();
 });
 
@@ -716,6 +768,7 @@ elabEditor.addEventListener('keydown', function(e) {
     const end = this.selectionEnd;
     this.value = this.value.substring(0, start) + '  ' + this.value.substring(end);
     this.selectionStart = this.selectionEnd = start + 2;
+    elabEditorDirty = true;
     updateElabModifiedState();
   }
 });
@@ -736,13 +789,11 @@ function saveElaborationScript() {
     type: 'saveElaborationScript',
     script: elabEditor.value,
   });
-  const msg = document.getElementById('elab-saved-msg');
-  msg.classList.add('show');
-  clearTimeout(elabSavedTimer);
-  elabSavedTimer = setTimeout(() => msg.classList.remove('show'), 2000);
+  // "Saved" is flashed on host confirmation (saveResult), not optimistically.
 }
 
 function resetElaborationScript() {
+  elabEditorDirty = false;
   vscode.postMessage({ type: 'resetElaborationScript' });
 }
 
@@ -867,8 +918,33 @@ window.addEventListener('message', event => {
     renderTools(msg.tools);
   } else if (msg.type === 'toolsLoading') {
     setToolsLoading();
+  } else if (msg.type === 'saveResult') {
+    handleSaveResult(msg);
   }
 });
+
+// Flash the outcome of a save once the extension host has actually
+// persisted (or failed to persist) the value.
+function handleSaveResult(msg) {
+  const isElab = msg.section === 'elab';
+  const el = document.getElementById(isElab ? 'elab-saved-msg' : 'saved-msg');
+  if (msg.ok) {
+    if (isElab) { elabEditorDirty = false; } else { editorDirty = false; }
+    el.textContent = 'Saved';
+    el.classList.remove('error');
+  } else {
+    el.textContent = 'Save failed';
+    el.classList.add('error');
+  }
+  el.classList.add('show');
+  if (isElab) {
+    clearTimeout(elabSavedTimer);
+    elabSavedTimer = setTimeout(() => el.classList.remove('show'), 2000);
+  } else {
+    clearTimeout(savedTimer);
+    savedTimer = setTimeout(() => el.classList.remove('show'), 2000);
+  }
+}
 
 // ── Tools section ───────────────────────────────────────────────────────
 
@@ -949,6 +1025,10 @@ function renderTools(tools) {
 }
 
 function renderState(msg) {
+  // Switching target deliberately replaces the script editor's content, so
+  // unsaved edits for the previous target are discarded in that case only.
+  const targetChanged = currentTargetId !== '' && currentTargetId !== msg.targetId;
+
   // Populate target dropdown
   const sel = document.getElementById('target-select');
   if (sel.options.length === 0 || currentTargetId !== msg.targetId) {
@@ -966,32 +1046,46 @@ function renderState(msg) {
   // Out-of-context checkbox
   document.getElementById('out-of-context').checked = !!msg.outOfContext;
 
-  // Script editor: show custom script if set, otherwise default
+  // Script editor: show custom script if set, otherwise default. Never
+  // overwrite unsaved edits — any clash-toolkit config change re-sends
+  // state (e.g. toggling the checkbox above), and clobbering the textarea
+  // would silently destroy the user's work-in-progress.
   currentDefault = msg.defaultScript;
   const hasCustom = msg.customScript && msg.customScript.length > 0;
-  editor.value = hasCustom ? msg.customScript : msg.defaultScript;
+  if (!editorDirty || targetChanged) {
+    editorDirty = false;
+    editor.value = hasCustom ? msg.customScript : msg.defaultScript;
 
-  // Modified badge
-  document.getElementById('modified-badge').classList.toggle('hidden', !hasCustom);
+    // Modified badge
+    document.getElementById('modified-badge').classList.toggle('hidden', !hasCustom);
 
-  // Diff section
-  if (hasCustom && msg.diff && msg.diff.length > 0) {
-    document.getElementById('diff-section').style.display = '';
-    renderDiff(msg.diff);
+    // Diff section
+    if (hasCustom && msg.diff && msg.diff.length > 0) {
+      document.getElementById('diff-section').style.display = '';
+      renderDiff(msg.diff);
+    } else {
+      document.getElementById('diff-section').style.display = 'none';
+    }
   } else {
-    document.getElementById('diff-section').style.display = 'none';
+    // Keep the user's edits; refresh badge/diff against the (possibly new)
+    // default script.
+    updateModifiedState();
   }
 
-  // Elaboration editor
+  // Elaboration editor — same dirty rule.
   elabCurrentDefault = msg.elaborationDefault || '';
   const hasElabCustom = msg.elaborationCustom && msg.elaborationCustom.length > 0;
-  elabEditor.value = hasElabCustom ? msg.elaborationCustom : elabCurrentDefault;
-  document.getElementById('elab-modified-badge').classList.toggle('hidden', !hasElabCustom);
-  if (hasElabCustom && msg.elaborationDiff && msg.elaborationDiff.length > 0) {
-    document.getElementById('elab-diff-section').style.display = '';
-    renderElabDiff(msg.elaborationDiff);
+  if (!elabEditorDirty) {
+    elabEditor.value = hasElabCustom ? msg.elaborationCustom : elabCurrentDefault;
+    document.getElementById('elab-modified-badge').classList.toggle('hidden', !hasElabCustom);
+    if (hasElabCustom && msg.elaborationDiff && msg.elaborationDiff.length > 0) {
+      document.getElementById('elab-diff-section').style.display = '';
+      renderElabDiff(msg.elaborationDiff);
+    } else {
+      document.getElementById('elab-diff-section').style.display = 'none';
+    }
   } else {
-    document.getElementById('elab-diff-section').style.display = 'none';
+    updateElabModifiedState();
   }
 }
 
