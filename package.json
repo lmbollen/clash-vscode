@@ -347,7 +347,7 @@
     "watch": "tsc -watch -p ./",
     "pretest": "npm run clean && npm run compile && npm run lint",
     "lint": "eslint src",
-    "test": "VSCODE_EXECUTABLE_PATH=${VSCODE_EXECUTABLE_PATH:-code} node ./out/test/runTest.js",
+    "test": "node ./out/test/runTest.js",
     "test:unit": "echo 'Unit tests require running in VS Code test environment. Use F5 with Extension Tests configuration.'",
     "package": "vsce package",
     "publish": "vsce publish"

@@ -10,7 +10,7 @@
     flake-utils.lib.eachDefaultSystem (system:
       let
         pkgs = import nixpkgs { system = system; config.allowUnfree = true; };
-        
+
         # GHC with Clash and required plugins
         ghcWithClash = pkgs.haskellPackages.ghcWithPackages (ps: with ps; [
           clash-ghc
@@ -33,20 +33,20 @@
           buildInputs = with pkgs; [
             # Node.js and npm for extension development
             nodejs_20
-            
+
             # VS Code extension development tools
             nodePackages.npm
             nodePackages.typescript
             nodePackages.typescript-language-server
-            
+
             # VS Code for testing
-            vscode-fhs
-            
+            # vscode-fhs
+
             # Haskell toolchain with Clash
             ghcWithClash
             cabal-install
             haskell-language-server
-            
+
             # Hardware synthesis tools
             yosys
 
