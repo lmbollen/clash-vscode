@@ -62,11 +62,11 @@
               hs-pkgs.haskell-language-server
 
               # Regular dependencies you may want to use in your project
-              pkgs.hello
-              pkgs.yosys
-              pkgs.nextpnr
-              pkgs.trellis
-              pkgs.graphviz
+              # pkgs.hello
+              # pkgs.yosys
+              # pkgs.nextpnr
+              # pkgs.trellis
+              # pkgs.graphviz
             ];
           };
 
@@ -81,7 +81,7 @@
                 echo "Simply run: nix develop"
                 exit 1
               fi
-              
+
               cabal build --write-ghc-environment-files=never
               cabal run clash ${top-module} -- --${hdl}
               echo "Removing" .ghc.environment.*
