@@ -1,9 +1,27 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 
+/** Marketplace id of the extension that provides HLS integration. */
+export const HASKELL_EXTENSION_ID = 'haskell.haskell';
+
+/**
+ * Availability of HLS as seen through the Haskell extension.
+ *
+ * Note we cannot probe HLS directly: `executeDocumentSymbolProvider`
+ * returns the same empty result whether no provider is registered or the
+ * provider found nothing, so the Haskell extension's install/activation
+ * state is the only reliable signal.
+ */
+export interface HLSAvailability {
+    available: boolean;
+    reason?: 'extension-missing' | 'extension-inactive';
+    /** Human-readable, actionable explanation when unavailable. */
+    message?: string;
+}
+
 /**
  * Manager for Haskell Language Server client
- * 
+ *
  * This class provides access to HLS functionality without directly
  * managing the language client (which is typically handled by the
  * Haskell extension). We use VS Code's built-in language features
@@ -17,6 +35,39 @@ export class HLSClient {
 
     constructor(outputChannel: vscode.OutputChannel) {
         this.outputChannel = outputChannel;
+    }
+
+    /**
+     * Check whether HLS is available via the Haskell extension.
+     *
+     * `available: false` with reason 'extension-missing' means the Haskell
+     * extension is not installed at all; 'extension-inactive' means it is
+     * installed but has not (yet) activated. A user running HLS through a
+     * custom LSP client is not detected here — callers should therefore only
+     * consult this check to explain an empty symbol result, not to gate
+     * requests.
+     */
+    checkAvailability(): HLSAvailability {
+        const ext = vscode.extensions.getExtension(HASKELL_EXTENSION_ID);
+        if (!ext) {
+            return {
+                available: false,
+                reason: 'extension-missing',
+                message:
+                    `The Haskell extension (${HASKELL_EXTENSION_ID}) is not installed, ` +
+                    'so HLS is unavailable and functions cannot be detected.',
+            };
+        }
+        if (!ext.isActive) {
+            return {
+                available: false,
+                reason: 'extension-inactive',
+                message:
+                    'The Haskell extension is installed but not active yet. ' +
+                    'Open a Haskell file, give HLS a moment to start, then try again.',
+            };
+        }
+        return { available: true };
     }
 
     /**

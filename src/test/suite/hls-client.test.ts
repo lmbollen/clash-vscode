@@ -77,4 +77,14 @@ suite('HLS Client Test Suite', () => {
 		const result = hlsClient.extractTypeSignature(hovers);
 		assert.strictEqual(result, 'Unsigned 16 -> Bool');
 	});
+
+	test('checkAvailability reports the Haskell extension as missing in the test host', () => {
+		// The test host runs with an isolated extensions dir where only this
+		// extension is installed, so the Haskell extension is always absent.
+		const result = hlsClient.checkAvailability();
+		assert.strictEqual(result.available, false);
+		assert.strictEqual(result.reason, 'extension-missing');
+		assert.ok(result.message && result.message.includes('haskell.haskell'),
+			'Message should name the missing extension');
+	});
 });

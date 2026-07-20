@@ -47,11 +47,15 @@ export class FunctionDetector {
                 }
             }
         } else {
-            this.outputChannel.appendLine('⚠️  No symbols returned. Possible reasons:');
-            this.outputChannel.appendLine('   1. HLS is still indexing the file');
-            this.outputChannel.appendLine('   2. File has compilation errors');
-            this.outputChannel.appendLine('   3. Haskell extension is not active');
-            this.outputChannel.appendLine('   Try: Save the file, wait a moment, and run the command again');
+            const hls = this.hlsClient.checkAvailability();
+            if (!hls.available) {
+                this.outputChannel.appendLine(`⚠️  No symbols returned: ${hls.message}`);
+            } else {
+                this.outputChannel.appendLine('⚠️  No symbols returned. Possible reasons:');
+                this.outputChannel.appendLine('   1. HLS is still indexing the file');
+                this.outputChannel.appendLine('   2. File has compilation errors');
+                this.outputChannel.appendLine('   Try: Save the file, wait a moment, and run the command again');
+            }
         }
 
         const functions: FunctionInfo[] = [];
