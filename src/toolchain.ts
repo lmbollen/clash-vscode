@@ -97,11 +97,28 @@ export interface ToolStatus {
 }
 
 /**
+ * Split a user-configured command string into command + args.
+ * Honours double quotes so paths with spaces work:
+ *   `"/opt/My Tools/bin/yosys" -m plug` → ['/opt/My Tools/bin/yosys', '-m', 'plug']
+ */
+export function splitCommand(command: string): string[] {
+    const parts: string[] = [];
+    const re = /"([^"]*)"|(\S+)/g;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(command)) !== null) {
+        parts.push(m[1] !== undefined ? m[1] : m[2]);
+    }
+    return parts;
+}
+
+/**
  * Checks availability of external tools needed by the extension.
  * Results are cached per session and can be refreshed on demand.
  */
 export class ToolchainChecker {
-    private cache = new Map<string, ToolStatus>();
+    /** Keyed by tool id; remembers which command string was probed so a
+     *  settings change (e.g. a new yosysCommand) invalidates the entry. */
+    private cache = new Map<string, { status: ToolStatus; command: string }>();
     private outputChannel: vscode.OutputChannel;
 
     constructor(outputChannel: vscode.OutputChannel) {
@@ -119,12 +136,12 @@ export class ToolchainChecker {
         cwd?: string
     ): Promise<ToolStatus> {
         const cached = this.cache.get(name);
-        if (cached) {
-            return cached;
+        if (cached && cached.command === command) {
+            return cached.status;
         }
 
         const status = await this.probe(name, command, versionFlag, cwd);
-        this.cache.set(name, status);
+        this.cache.set(name, { status, command });
         return status;
     }
 
@@ -138,7 +155,7 @@ export class ToolchainChecker {
         cwd?: string
     ): Promise<ToolStatus> {
         return new Promise((resolve) => {
-            const parts = command.split(/\s+/);
+            const parts = splitCommand(command);
             const cmd = parts[0];
             const baseArgs = parts.slice(1);
             const args = [...baseArgs, versionFlag];
@@ -164,7 +181,10 @@ export class ToolchainChecker {
                     const output = (stdout + stderr).trim();
                     const firstLine = output.split('\n')[0] || '';
 
-                    if (code === 0 || output.length > 0) {
+                    // Only a clean exit counts as available — a tool that
+                    // prints an error and exits non-zero must not be reported
+                    // as present with the error text shown as its "version".
+                    if (code === 0) {
                         const resolvedPath = await resolveCommandPath(cmd);
                         resolve({
                             name,
@@ -176,7 +196,9 @@ export class ToolchainChecker {
                         resolve({
                             name,
                             available: false,
-                            error: `Exited with code ${code}`,
+                            error: firstLine
+                                ? `Exited with code ${code}: ${firstLine}`
+                                : `Exited with code ${code}`,
                         });
                     }
                 });
@@ -212,7 +234,9 @@ export class ToolchainChecker {
         });
 
         await Promise.all(checks);
-        return new Map(this.cache);
+        return new Map(
+            [...this.cache.entries()].map(([id, entry]) => [id, entry.status])
+        );
     }
 
     /**
@@ -221,7 +245,7 @@ export class ToolchainChecker {
      */
     snapshotStatuses(): ToolStatus[] {
         return TOOL_DEFINITIONS.map(def =>
-            this.cache.get(def.id) ?? {
+            this.cache.get(def.id)?.status ?? {
                 name: def.id,
                 available: false,
                 error: 'not yet probed',
@@ -278,7 +302,7 @@ export class ToolchainChecker {
      */
     formatSummary(): string {
         const lines: string[] = ['Toolchain Status:', '-'.repeat(40)];
-        for (const [, status] of this.cache) {
+        for (const [, { status }] of this.cache) {
             if (status.available) {
                 lines.push(`  ✓ ${status.name}: ${status.version || 'available'}`);
             } else {
