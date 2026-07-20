@@ -15,10 +15,17 @@ suite('ManagedToolchain Test Suite', () => {
 
 	suiteSetup(() => {
 		outputChannel = vscode.window.createOutputChannel('Test Managed Toolchain');
-		// A throwaway global-storage dir guarantees "not installed" state.
+		// A throwaway global-storage dir guarantees "not installed" state, and
+		// an in-memory globalState stub stands in for the real Memento.
 		const fakeStorage = path.join(os.tmpdir(), `clash-tp-test-${process.pid}`);
+		const store = new Map<string, unknown>();
 		const fakeContext = {
 			globalStorageUri: vscode.Uri.file(fakeStorage),
+			globalState: {
+				get: (key: string, dflt?: unknown) => (store.has(key) ? store.get(key) : dflt),
+				update: (key: string, value: unknown) => { store.set(key, value); return Promise.resolve(); },
+				keys: () => [...store.keys()],
+			},
 		} as unknown as vscode.ExtensionContext;
 		toolchain = new ManagedToolchain(fakeContext, outputChannel);
 	});

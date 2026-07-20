@@ -5,7 +5,5 @@
   "haskell.plugin.inlayHints.globalOn": false,
   "haskell.plugin.codeRange.globalOn": false,
   "haskell.plugin.hlint.codeActionsOn": false,
-  "haskell.plugin.hlint.diagnosticsOn": false,
-  "clash-toolkit.synthesisTarget": "ecp5",
-  "clash-toolkit.outOfContext": true
+  "haskell.plugin.hlint.diagnosticsOn": false
 }
