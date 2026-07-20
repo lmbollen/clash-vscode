@@ -138,6 +138,36 @@
       }
     ],
     "menus": {
+      "commandPalette": [
+        {
+          "command": "clash-toolkit.goToFunction",
+          "when": "false"
+        },
+        {
+          "command": "clash-toolkit.selectRun",
+          "when": "false"
+        },
+        {
+          "command": "clash-toolkit.viewModuleDiagram",
+          "when": "false"
+        },
+        {
+          "command": "clash-toolkit.openSynthesizedVerilog",
+          "when": "false"
+        },
+        {
+          "command": "clash-toolkit.openHistoryVerilog",
+          "when": "false"
+        },
+        {
+          "command": "clash-toolkit.openHistoryDiagram",
+          "when": "false"
+        },
+        {
+          "command": "clash-toolkit.deleteRun",
+          "when": "false"
+        }
+      ],
       "view/title": [
         {
           "command": "clash-toolkit.synthesizeFunction",

@@ -54,7 +54,6 @@ suite('Code Generator Test Suite', () => {
 		}
 
 		const config: GenerationConfig = {
-			keepFiles: true,
 			modulePrefix: 'ClashSynth_'
 		};
 
@@ -95,7 +94,6 @@ suite('Code Generator Test Suite', () => {
 		}
 
 		const config: GenerationConfig = {
-			keepFiles: true,
 			modulePrefix: 'Test_'
 		};
 
@@ -126,7 +124,6 @@ suite('Code Generator Test Suite', () => {
 		}
 
 		const config: GenerationConfig = {
-			keepFiles: true,
 			modulePrefix: 'Test_'
 		};
 
@@ -157,7 +154,6 @@ suite('Code Generator Test Suite', () => {
 		}
 
 		const config: GenerationConfig = {
-			keepFiles: true,
 			modulePrefix: 'Test_'
 		};
 
@@ -204,7 +200,6 @@ suite('Code Generator Test Suite', () => {
 		}
 
 		const config: GenerationConfig = {
-			keepFiles: true,
 			modulePrefix: 'Test_'
 		};
 
@@ -232,7 +227,6 @@ suite('Code Generator Test Suite', () => {
 		}
 
 		const config: GenerationConfig = {
-			keepFiles: true,
 			modulePrefix: 'ClashSynth_'
 		};
 
@@ -369,7 +363,6 @@ suite('Code Generator Test Suite', () => {
 		}
 
 		const config: GenerationConfig = {
-			keepFiles: true,
 			modulePrefix: 'ClashSynth_'
 		};
 
@@ -445,7 +438,7 @@ suite('Code Generator Test Suite', () => {
 		const wsRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
 		if (!wsRoot) { return this.skip(); }
 
-		const config: GenerationConfig = { keepFiles: true, modulePrefix: 'ClashSynth_' };
+		const config: GenerationConfig = { modulePrefix: 'ClashSynth_' };
 
 		const funcA: FunctionInfo = {
 			name: 'regressionAlpha',
@@ -511,7 +504,7 @@ suite('Code Generator Test Suite', () => {
 		const wsRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
 		if (!wsRoot) { return this.skip(); }
 
-		const config: GenerationConfig = { keepFiles: true, modulePrefix: 'ClashSynth_' };
+		const config: GenerationConfig = { modulePrefix: 'ClashSynth_' };
 		const sourceFile = path.join(wsRoot, 'src', 'Example', 'Project.hs');
 
 		const func: FunctionInfo = {

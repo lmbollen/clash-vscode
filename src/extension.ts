@@ -1,6 +1,6 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
-import { HLSClient } from './hls-client';
+import { HLSClient, HASKELL_EXTENSION_ID } from './hls-client';
 import { FunctionDetector } from './function-detector';
 import { CodeGenerator, GenerationConfig, ProjectDirectories } from './code-generator';
 import { promises as fsp } from 'fs';
@@ -78,6 +78,7 @@ let runHistoryTreeProvider: RunHistoryTreeProvider;
 let haskellFunctionsTreeProvider: HaskellFunctionsTreeProvider;
 let haskellFunctionsTreeView: vscode.TreeView<import('./haskell-functions-tree').FunctionTreeNode>;
 let hlsClient: HLSClient;
+let clashDiagnostics: vscode.DiagnosticCollection;
 let functionDetector: FunctionDetector;
 let codeGenerator: CodeGenerator;
 let clashCompiler: ClashCompiler;
@@ -124,6 +125,8 @@ export function activate(context: vscode.ExtensionContext) {
 	functionDetector = new FunctionDetector(hlsClient, outputChannel);
 	codeGenerator = new CodeGenerator(outputChannel);
 	clashCompiler = new ClashCompiler(outputChannel);
+	clashDiagnostics = vscode.languages.createDiagnosticCollection('clash');
+	context.subscriptions.push(clashDiagnostics);
 	yosysRunner = new YosysRunner(outputChannel);
 	nextpnrRunner = new NextpnrRunner(outputChannel);
 	toolchain = new ToolchainChecker(outputChannel);
@@ -369,15 +372,58 @@ export function activate(context: vscode.ExtensionContext) {
  * sidebar tree.  Shows a loading spinner while HLS analysis is running.
  * Silently ignores errors (HLS may not be ready yet).
  */
+let functionsTreeRefreshSeq = 0;
+
 async function refreshHaskellFunctionsTree(doc: vscode.TextDocument): Promise<void> {
+	// Sequence guard: HLS detections can complete out of order (switch from a
+	// slow-to-analyze file to a fast one), and a stale result must not
+	// overwrite the newer file's tree.
+	const seq = ++functionsTreeRefreshSeq;
 	haskellFunctionsTreeProvider.setLoading(doc.fileName);
+	let functions: FunctionInfo[] = [];
 	try {
-		const functions = await functionDetector.detectFunctions(doc);
-		haskellFunctionsTreeProvider.refresh(functions, doc.fileName);
+		functions = await functionDetector.detectFunctions(doc);
 	} catch {
-		// HLS not ready — leave the loading state shown so the user knows
-		// something was attempted; they can hit Refresh once HLS is up.
-		haskellFunctionsTreeProvider.refresh([], doc.fileName);
+		// HLS not ready — fall through with an empty list; the banner below
+		// explains why, and the user can hit Refresh once HLS is up.
+	}
+	if (seq !== functionsTreeRefreshSeq) {
+		return; // superseded by a newer refresh
+	}
+	haskellFunctionsTreeProvider.refresh(functions, doc.fileName);
+
+	// When nothing was found, surface *why* in the view banner instead of
+	// showing a silently empty tree — most commonly the Haskell extension
+	// (which provides HLS) is missing or hasn't activated yet.
+	const hls = hlsClient.checkAvailability();
+	haskellFunctionsTreeView.message =
+		functions.length === 0 && !hls.available ? `⚠ ${hls.message}` : undefined;
+}
+
+/**
+ * Explain an empty function-detection result to the user.
+ *
+ * Distinguishes "HLS is unavailable" (Haskell extension missing/inactive)
+ * from a genuinely empty result, and offers to install the Haskell
+ * extension when it is missing.
+ */
+function notifyNoFunctionsDetected(fallbackMessage: string): void {
+	const hls = hlsClient.checkAvailability();
+	if (hls.reason === 'extension-missing') {
+		vscode.window
+			.showErrorMessage(hls.message!, 'Install Haskell Extension')
+			.then((choice) => {
+				if (choice === 'Install Haskell Extension') {
+					vscode.commands.executeCommand(
+						'workbench.extensions.search',
+						`@id:${HASKELL_EXTENSION_ID}`
+					);
+				}
+			});
+	} else if (hls.reason === 'extension-inactive') {
+		vscode.window.showWarningMessage(hls.message!);
+	} else {
+		vscode.window.showWarningMessage(fallbackMessage);
 	}
 }
 
@@ -426,6 +472,14 @@ function registerCommands(context: vscode.ExtensionContext) {
 			outputChannel.show(true);
 			outputChannel.appendLine('');
 			outputChannel.appendLine(toolchain.formatSummary());
+			// HLS is provided by the Haskell extension, not a CLI binary, so it
+			// is reported separately from the spawned-tool checks above.
+			const hls = hlsClient.checkAvailability();
+			outputChannel.appendLine(
+				hls.available
+					? '  ✓ HLS (via Haskell extension): available'
+					: `  ✗ HLS: ${hls.message}`
+			);
 		})
 	);
 }
@@ -472,7 +526,7 @@ async function detectFunctionsCommand() {
 		}
 
 		if (functions.length === 0) {
-			vscode.window.showWarningMessage(
+			notifyNoFunctionsDetected(
 				'No functions detected. Make sure HLS is running and the file is properly indexed.'
 			);
 			outputChannel.appendLine('No functions found');
@@ -600,7 +654,7 @@ async function pickFunction(providedFunc?: FunctionInfo): Promise<FunctionInfo |
 
 	const functions = await functionDetector.detectFunctions(activeEditor.document);
 	if (functions.length === 0) {
-		vscode.window.showWarningMessage('No functions found to synthesize');
+		notifyNoFunctionsDetected('No functions found to synthesize');
 		return undefined;
 	}
 
@@ -636,7 +690,8 @@ async function runYosynsSynthesis(
 	outOfContext: boolean,
 	targetFamily: string,
 	progress: ProgressReporter,
-	customScript?: string
+	customScript?: string,
+	abortSignal?: AbortSignal
 ): Promise<SynthesisOutput> {
 	const { compileResult, projectDirs, topModule, verilogInput } = compiled;
 
@@ -653,7 +708,8 @@ async function runYosynsSynthesis(
 	const yosysOpts = {
 		workspaceRoot: wsRoot, outputDir: projectDirs.yosys,
 		topModule, verilogPath: verilogInput, targetFamily,
-		customScript: customScript || undefined
+		customScript: customScript || undefined,
+		abortSignal
 	} as import('./yosys-types').YosysOptions;
 
 	const perModuleFlow = flow === 'elaborate' || outOfContext;
@@ -726,10 +782,11 @@ async function runCompile(
 	func: FunctionInfo,
 	wsRoot: string,
 	progress: ProgressReporter,
-	runId?: string
+	runId?: string,
+	abortSignal?: AbortSignal
 ): Promise<CompilationOutput> {
 	const projectDirs = CodeGenerator.getProjectDirectories(wsRoot, func, runId);
-	const genConfig: GenerationConfig = { keepFiles: true, modulePrefix: 'ClashSynth_' };
+	const genConfig: GenerationConfig = { modulePrefix: 'ClashSynth_' };
 
 	outputChannel.appendLine(`\nRun: ${projectDirs.runId}`);
 	outputChannel.appendLine(`Run directory: ${projectDirs.runRoot}`);
@@ -750,21 +807,35 @@ async function runCompile(
 		moduleName: wrapperResult.moduleName,
 		hdlDir: projectDirs.verilog,
 		synthProjectRoot: synthInfo.synthRoot,
-		cabalProjectDir: synthInfo.cabalProjectDir ?? undefined
+		cabalProjectDir: synthInfo.cabalProjectDir ?? undefined,
+		abortSignal
 	});
 
 	if (!compileResult.success) {
+		if (abortSignal?.aborted) {
+			throw new Error('Compilation cancelled');
+		}
 		if (compileResult.errors.length > 0) {
 			outputChannel.appendLine('Errors:');
 			compileResult.errors.forEach(e => outputChannel.appendLine(`  ${e}`));
 		}
+		// Surface wrapper errors as squiggles in the generated file too.
+		clashDiagnostics.set(
+			vscode.Uri.file(wrapperResult.filePath),
+			clashCompiler.parseDiagnostics(compileResult.output, wrapperResult.filePath)
+		);
 		throw new Error('Clash compilation failed — check the output channel for details');
 	}
+	clashDiagnostics.clear();
 	outputChannel.appendLine(`✓ Verilog: ${compileResult.verilogPath}`);
 
-	const topModule = compileResult.manifest?.top_component?.name
-		?? path.basename(compileResult.verilogPath!, '.v');
-	const verilogInput = compileResult.allVerilogFiles ?? compileResult.verilogPath!;
+	// compileToVerilog guarantees these on success — a violation is an
+	// internal error we want to hear about, not paper over with basenames.
+	if (!compileResult.manifest || !compileResult.allVerilogFiles || !compileResult.verilogPath) {
+		throw new Error('Internal error: Clash compile succeeded without manifest/Verilog metadata');
+	}
+	const topModule = compileResult.manifest.top_component.name;
+	const verilogInput = compileResult.allVerilogFiles;
 
 	return { wrapperResult, compileResult, projectDirs, topModule, verilogInput };
 }
@@ -813,10 +884,12 @@ async function runPipeline(
 	outOfContext: boolean,
 	targetFamily: string,
 	progress: ProgressReporter,
-	customScript?: string
+	customScript?: string,
+	runId?: string,
+	abortSignal?: AbortSignal
 ): Promise<{ compiled: CompilationOutput; synthesis: SynthesisOutput }> {
-	const compiled = await runCompile(func, wsRoot, progress);
-	const synthesis = await runYosynsSynthesis(compiled, wsRoot, flow, outOfContext, targetFamily, progress, customScript);
+	const compiled = await runCompile(func, wsRoot, progress, runId, abortSignal);
+	const synthesis = await runYosynsSynthesis(compiled, wsRoot, flow, outOfContext, targetFamily, progress, customScript, abortSignal);
 	return { compiled, synthesis };
 }
 
@@ -833,6 +906,10 @@ async function synthesizeFunctionCommand(providedFunc?: FunctionInfo) {
 	const func = await pickFunction(providedFunc);
 	if (!func) { return; }
 
+	// Fix the run id up front so a failure anywhere in the pipeline can still
+	// be recorded against the correct run directory.
+	const runDirs = CodeGenerator.getProjectDirectories(wsRoot, func);
+
 	outputChannel.show(true);
 	outputChannel.appendLine('='.repeat(60));
 	outputChannel.appendLine(`Generate Verilog: ${func.name}`);
@@ -842,9 +919,12 @@ async function synthesizeFunctionCommand(providedFunc?: FunctionInfo) {
 		await vscode.window.withProgress({
 			location: vscode.ProgressLocation.Notification,
 			title: `Compiling ${func.name} to Verilog`,
-			cancellable: false
-		}, async (progress) => {
-			const { compileResult, projectDirs } = await runCompile(func, wsRoot, progress);
+			cancellable: true
+		}, async (progress, token) => {
+			const abortController = new AbortController();
+			token.onCancellationRequested(() => abortController.abort());
+			const { compileResult, projectDirs } =
+				await runCompile(func, wsRoot, progress, runDirs.runId, abortController.signal);
 			progress.report({ message: 'Done', increment: 100 });
 
 			await writeRunMetadata(projectDirs, func, 'generate-verilog', {
@@ -869,6 +949,7 @@ async function synthesizeFunctionCommand(providedFunc?: FunctionInfo) {
 		const msg = error instanceof Error ? error.message : String(error);
 		vscode.window.showErrorMessage(`Verilog generation failed: ${msg}`);
 		outputChannel.appendLine(`ERROR: ${msg}`);
+		await writeRunMetadata(runDirs, func, 'generate-verilog', { success: false, error: msg });
 	}
 }
 
@@ -892,6 +973,9 @@ async function elaborateCommand(providedFunc?: FunctionInfo) {
 	const func = await pickFunction(providedFunc);
 	if (!func) { return; }
 
+	// Fix the run id up front so failures can be recorded against the run.
+	const runDirs = CodeGenerator.getProjectDirectories(wsRoot, func);
+
 	outputChannel.show(true);
 	outputChannel.appendLine('='.repeat(60));
 	outputChannel.appendLine(`Elaborate: ${func.name}`);
@@ -901,8 +985,10 @@ async function elaborateCommand(providedFunc?: FunctionInfo) {
 		await vscode.window.withProgress({
 			location: vscode.ProgressLocation.Notification,
 			title: `Elaborating ${func.name}`,
-			cancellable: false
-		}, async (progress) => {
+			cancellable: true
+		}, async (progress, token) => {
+			const abortController = new AbortController();
+			token.onCancellationRequested(() => abortController.abort());
 			// Elaboration uses its own script template — user-overridable via the
 			// `elaborationScript` setting.  The target dropdown is irrelevant at
 			// this stage (no tech mapping), so we pass 'generic' and ignore it.
@@ -919,7 +1005,9 @@ async function elaborateCommand(providedFunc?: FunctionInfo) {
 					true,
 					'generic',
 					progress,
-					customScript
+					customScript,
+					runDirs.runId,
+					abortController.signal
 				);
 
 			progress.report({ message: 'Done', increment: 100 });
@@ -955,6 +1043,7 @@ async function elaborateCommand(providedFunc?: FunctionInfo) {
 		const msg = error instanceof Error ? error.message : String(error);
 		vscode.window.showErrorMessage(`Elaboration error: ${msg}`);
 		outputChannel.appendLine(`ERROR: ${msg}`);
+		await writeRunMetadata(runDirs, func, 'elaborate', { success: false, error: msg });
 	}
 }
 
@@ -973,6 +1062,9 @@ async function synthesizeCommand(providedFunc?: FunctionInfo) {
 	const func = await pickFunction(providedFunc);
 	if (!func) { return; }
 
+	// Fix the run id up front so failures can be recorded against the run.
+	const runDirs = CodeGenerator.getProjectDirectories(wsRoot, func);
+
 	outputChannel.show(true);
 	outputChannel.appendLine('='.repeat(60));
 	outputChannel.appendLine(`Synthesize: ${func.name}`);
@@ -982,8 +1074,10 @@ async function synthesizeCommand(providedFunc?: FunctionInfo) {
 		await vscode.window.withProgress({
 			location: vscode.ProgressLocation.Notification,
 			title: `Synthesizing ${func.name}`,
-			cancellable: false
-		}, async (progress) => {
+			cancellable: true
+		}, async (progress, token) => {
+			const abortController = new AbortController();
+			token.onCancellationRequested(() => abortController.abort());
 			const targetFamily = cfg.get<string>('synthesisTarget', 'generic');
 			const customScript = cfg.get<string>(`synthesisScript.${targetFamily}`, '') || undefined;
 			const outOfContext = cfg.get<boolean>('outOfContext', false);
@@ -993,7 +1087,9 @@ async function synthesizeCommand(providedFunc?: FunctionInfo) {
 					'synthesize',
 					outOfContext,
 					targetFamily, progress,
-					customScript
+					customScript,
+					runDirs.runId,
+					abortController.signal
 				);
 
 			progress.report({ message: 'Done', increment: 100 });
@@ -1038,6 +1134,7 @@ async function synthesizeCommand(providedFunc?: FunctionInfo) {
 		const msg = error instanceof Error ? error.message : String(error);
 		vscode.window.showErrorMessage(`Synthesis error: ${msg}`);
 		outputChannel.appendLine(`ERROR: ${msg}`);
+		await writeRunMetadata(runDirs, func, 'synthesize', { success: false, error: msg });
 	}
 }
 
@@ -1070,6 +1167,9 @@ async function placeAndRouteCommand(providedFunc?: FunctionInfo) {
 	const func = await pickFunction(providedFunc);
 	if (!func) { return; }
 
+	// Fix the run id up front so failures can be recorded against the run.
+	const runDirs = CodeGenerator.getProjectDirectories(wsRoot, func);
+
 	// Device picker — populated from PNR_FAMILIES registry
 	const deviceChoice = await vscode.window.showQuickPick(
 		familyInfo.devices,
@@ -1097,11 +1197,18 @@ async function placeAndRouteCommand(providedFunc?: FunctionInfo) {
 			title: `Implementing ${func.name} on ${synthTarget.toUpperCase()}`,
 			cancellable: true
 		}, async (progress, token) => {
+			// Bridge VS Code's cancellation token into an AbortController that
+			// every pipeline stage (cabal/Clash, Yosys, nextpnr) listens on —
+			// Cancel must kill whichever child process is currently running,
+			// not just nextpnr.
+			const abortController = new AbortController();
+			const cancelSub = token.onCancellationRequested(() => abortController.abort());
+
 			// Steps 1–3: Clash + Yosys pipeline.
 			// PnR always uses whole-design synthesis (nextpnr needs a merged netlist).
 			const customScript = cfg.get<string>(`synthesisScript.${synthTarget}`, '') || undefined;
 			const { synthesis: { synthResult, moduleResults, topModule, sdcFrequencyMHz, projectDirs } } =
-				await runPipeline(func, wsRoot, 'synthesize', false, synthTarget, progress, customScript);
+				await runPipeline(func, wsRoot, 'synthesize', false, synthTarget, progress, customScript, runDirs.runId, abortController.signal);
 
 			const pnrInProgressLabel = `Synthesis — ${func.name} (P&R running…)`;
 			showSynthesisResults(moduleResults, undefined, pnrInProgressLabel);
@@ -1113,12 +1220,6 @@ async function placeAndRouteCommand(providedFunc?: FunctionInfo) {
 
 			progress.report({ message: `Place and Route with ${familyInfo.binary}…`, increment: 60 });
 			outputChannel.appendLine(`\n=== Step 4: Place & Route with ${familyInfo.binary} ===`);
-
-			// Bridge VS Code's cancellation token into a standard AbortController
-			// the nextpnr runner can listen on. Cancellation kills the child
-			// process so the progress notification doesn't get stuck waiting.
-			const abortController = new AbortController();
-			const cancelSub = token.onCancellationRequested(() => abortController.abort());
 
 			// Build family-specific options.
 			//
@@ -1254,6 +1355,18 @@ async function placeAndRouteCommand(providedFunc?: FunctionInfo) {
 		const msg = error instanceof Error ? error.message : String(error);
 		vscode.window.showErrorMessage(`Implementation error: ${msg}`);
 		outputChannel.appendLine(`ERROR: ${msg}`);
+		// The banner was set to "(P&R running…)" before the PnR stage; every
+		// failure path lands here, so replace it or it lies indefinitely.
+		if (synthesisResultsView?.message?.includes('P&R running')) {
+			synthesisResultsView.message = `Synthesis — ${func.name} (P&R failed)`;
+		}
+		await writeRunMetadata(runDirs, func, 'place-and-route', {
+			target: synthTarget,
+			device: deviceChoice.value,
+			packageName: packageChoice?.value,
+			success: false,
+			error: msg,
+		});
 	}
 }
 

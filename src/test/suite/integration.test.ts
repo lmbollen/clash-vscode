@@ -82,7 +82,6 @@ suite('Integration: Full Synthesis + PnR Flow', () => {
 		this.timeout(15000);
 
 		const genConfig: GenerationConfig = {
-			keepFiles: true,
 			modulePrefix: 'ClashSynth_',
 		};
 
