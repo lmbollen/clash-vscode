@@ -108,7 +108,12 @@ suite('NextpnrRunner: child-process lifecycle', () => {
 			// Same rationale as the previous test: avoid `process.exit()` so
 			// pending pipe writes drain before Node tears down stdout. Exit
 			// code 0 is the default, so we just let the event loop wind down.
+			// A successful run must write its --report JSON (the runner fails
+			// loudly without it); an empty report exercises the text-parse
+			// *supplement* path for fields the report lacks.
+			const reportPath = path.join(outDir, 'report.json');
 			const fakeScript = [
+				`require('fs').writeFileSync(${JSON.stringify(reportPath)}, '{}');`,
 				`const filler = 'noise '.repeat(200) + '\\n';`,
 				`for (let i = 0; i < 500; i++) process.stdout.write(filler);`,
 				`process.stdout.write('Info: Critical path report\\n');`,
@@ -119,7 +124,7 @@ suite('NextpnrRunner: child-process lifecycle', () => {
 				'node',
 				['-e', fakeScript],
 				makePnrOpts(outDir),
-				{ reportJsonPath: path.join(outDir, 'report.json') }
+				{ reportJsonPath: reportPath }
 			);
 
 			assert.ok(
@@ -139,6 +144,31 @@ suite('NextpnrRunner: child-process lifecycle', () => {
 			assert.strictEqual(result.timing?.maxFrequency, 123.45);
 		}
 	);
+
+	// ── Report contract ────────────────────────────────────────────────────
+
+	test('successful exit without report.json is a loud failure', async function () {
+		this.timeout(15_000);
+
+		const outDir = await fs.mkdtemp(path.join(tmpDir, 'out-'));
+
+		// Exit 0 but never write the --report file — the runner must refuse
+		// to fabricate timing/utilization from nothing.
+		const fakeScript = `process.stdout.write('Info: done\\n');`;
+
+		const result = await runner.runNextpnr(
+			'node',
+			['-e', fakeScript],
+			makePnrOpts(outDir),
+			{ reportJsonPath: path.join(outDir, 'report.json') }
+		);
+
+		assert.strictEqual(result.success, false, 'Missing report must fail the run');
+		assert.ok(
+			result.errors.some(e => /report/i.test(e.message)),
+			`Report error should be surfaced. Got: ${JSON.stringify(result.errors)}`
+		);
+	});
 
 	// ── Cancellation contract ──────────────────────────────────────────────
 

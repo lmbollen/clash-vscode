@@ -88,9 +88,6 @@ export class NextpnrRunner {
 	}
 
 	/**
-	 * Get nextpnr executable name for the specified family
-	 */
-	/**
 	 * Get the nextpnr executable name for a given FPGA family.
 	 */
 	static getExecutable(family: string): string {
@@ -101,10 +98,6 @@ export class NextpnrRunner {
 				return 'nextpnr-ice40';
 			case 'gowin':
 				return 'nextpnr-himbaechel';
-			case 'nexus':
-				return 'nextpnr-nexus';
-			case 'machxo2':
-				return 'nextpnr-machxo2';
 			default:
 				return 'nextpnr-generic';
 		}
@@ -126,6 +119,9 @@ export class NextpnrRunner {
 
 	/** Cache: "binary:device" → valid packages (survives for the session). */
 	private static packageCache = new Map<string, string[]>();
+
+	/** Monotonic id so concurrent package probes get distinct temp files. */
+	private static probeCounter = 0;
 
 	/**
 	 * Discover which packages a nextpnr binary accepts for the given device
@@ -155,9 +151,13 @@ export class NextpnrRunner {
 		// Write a minimal valid JSON netlist so nextpnr can parse it.
 		// Using /dev/null causes a JSON parse error that masks real
 		// "Unsupported package" errors.
+		// Keyed by PID *and* a counter: two overlapping probes in the same
+		// extension host must not share a file, or one call's cleanup unlinks
+		// the other's input mid-probe (an unreadable input is then
+		// misclassified as a valid package).
 		const probeJson = path.join(
 			os.tmpdir(),
-			`nextpnr-probe-${process.pid}.json`
+			`nextpnr-probe-${process.pid}-${NextpnrRunner.probeCounter++}.json`
 		);
 		await fs.writeFile(probeJson, '{"modules":{}}');
 
@@ -259,7 +259,9 @@ export class NextpnrRunner {
 		if (options.constraintsFile) {
 			switch (options.family) {
 				case 'ecp5': args.push('--lpf', options.constraintsFile); break;
-				case 'gowin': args.push('--cst', options.constraintsFile); break;
+				// The gowin executable is nextpnr-himbaechel, which has no
+				// --cst option — constraints go through --vopt cst=<file>.
+				case 'gowin': args.push('--vopt', `cst=${options.constraintsFile}`); break;
 				default: args.push('--pcf', options.constraintsFile); break;
 			}
 		}
@@ -372,18 +374,31 @@ export class NextpnrRunner {
 				}
 			};
 
+			// Per-stream buffers so a line straddling a pipe-chunk boundary is
+			// reassembled before matching, instead of being seen as two
+			// fragments neither of which matches.
+			let lineBufOut = '';
+			let lineBufErr = '';
+			const processLine = (line: string) => {
+				pushLine(line);
+				reportProgress(line);
+				const lower = line.trim().toLowerCase();
+				// Anchored: nextpnr prefixes messages with "Warning:"/"ERROR:",
+				// and substring matching would record e.g. a path containing
+				// "error" as an error.
+				if (lower.startsWith('warning')) { warnings.push({ message: line.trim() }); }
+				if (lower.startsWith('error') || lower.startsWith('fatal')) {
+					errors.push({ message: line.trim() });
+				}
+			};
 			const handleStream = (text: string, isStderr: boolean) => {
 				this.outputChannel.append(text);
-				for (const line of text.split(/\r?\n/)) {
-					pushLine(line);
-					reportProgress(line);
-					const lower = line.toLowerCase();
-					if (lower.includes('warning')) { warnings.push({ message: line.trim() }); }
-					if (lower.includes('error') || lower.startsWith('fatal')) {
-						errors.push({ message: line.trim() });
-					}
-				}
 				if (isStderr) { stderr += text; } else { stdout += text; }
+				const buffered = (isStderr ? lineBufErr : lineBufOut) + text;
+				const lines = buffered.split(/\r?\n/);
+				const rest = lines.pop() ?? '';
+				if (isStderr) { lineBufErr = rest; } else { lineBufOut = rest; }
+				for (const line of lines) { processLine(line); }
 			};
 
 			nextpnr.stdout.on('data', (data) => handleStream(data.toString(), false));
@@ -433,16 +448,29 @@ export class NextpnrRunner {
 				if (code === 0) {
 					this.outputChannel.appendLine('✓ Place and route successful');
 
-					// Prefer the structured JSON report; fall back to text scraping
-					// only when the report is missing (older nextpnr or malformed).
+					// The structured JSON report is required — we always pass
+					// --report, so a missing/unparseable file means something is
+					// wrong and must fail loudly rather than silently degrading
+					// to text-scraped guesses. The text parse of the combined
+					// output (nextpnr logs to STDERR) only *supplements* fields
+					// the report lacks, e.g. the pre-placement estimate.
 					const report = await NextpnrRunner.loadReportJson(reportJsonPath);
-					const timing = report
-						? NextpnrRunner.timingFromReport(report, this.parseTiming(stdout))
-						: this.parseTiming(stdout);
-					const utilization = report
-						? NextpnrRunner.utilizationFromReport(report, options.family)
-							?? this.parseUtilization(stdout)
-						: this.parseUtilization(stdout);
+					if (!report) {
+						const message =
+							`nextpnr exited successfully but its JSON report (${reportJsonPath}) ` +
+							'is missing or unparseable — timing/utilization results cannot be trusted.';
+						this.outputChannel.appendLine(`✗ ${message}`);
+						finalize({
+							success: false,
+							output: fullOutput,
+							warnings,
+							errors: [{ message }]
+						});
+						return;
+					}
+					const timing = NextpnrRunner.timingFromReport(report, this.parseTiming(fullOutput));
+					const utilization = NextpnrRunner.utilizationFromReport(report, options.family)
+						?? this.parseUtilization(fullOutput);
 					const criticalPaths = report
 						? NextpnrRunner.criticalPathsFromReport(report)
 						: [];
@@ -712,7 +740,9 @@ export class NextpnrRunner {
 				used += entry.used ?? 0;
 				total += entry.available ?? 0;
 			}
-			return matched ? { used, total } : undefined;
+			// A bucket with no known capacity would render as NaN%/Infinity%
+			// downstream — omit it rather than divide by zero.
+			return matched && total > 0 ? { used, total } : undefined;
 		};
 
 		const info: UtilizationInfo = {
@@ -794,7 +824,14 @@ export class NextpnrRunner {
 			timing.constraintsMet = false;
 		}
 
-		return timing;
+		// No parseable timing data → report "no data" instead of fabricating
+		// a constraintsMet:true verdict backed by nothing.
+		const hasData = timing.maxFrequency !== undefined
+			|| timing.prePlacementFrequency !== undefined
+			|| timing.criticalPathDelay !== undefined
+			|| timing.setupSlack !== undefined
+			|| timing.holdSlack !== undefined;
+		return hasData ? timing : undefined;
 	}
 
 	/**
@@ -1052,7 +1089,7 @@ export class NextpnrRunner {
 	 * Create a text-based bar chart
 	 */
 	private createBar(used: number, total: number, width: number): string {
-		const percent = used / total;
+		const percent = total > 0 ? Math.min(1, used / total) : 0;
 		const filled = Math.round(percent * width);
 		const empty = width - filled;
 		return '[' + '█'.repeat(filled) + '░'.repeat(empty) + ']';

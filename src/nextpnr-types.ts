@@ -5,7 +5,10 @@
 /**
  * Supported FPGA families for nextpnr
  */
-export type NextpnrFamily = 'ecp5' | 'ice40' | 'gowin' | 'nexus' | 'machxo2' | 'generic';
+// Note: nexus/machxo2 were removed — their nextpnr binaries take different
+// output/constraint flags (--fasm/--pdc) that buildNextpnrArgs does not
+// emit, so claiming support was misleading. Re-add with proper arg handling.
+export type NextpnrFamily = 'ecp5' | 'ice40' | 'gowin' | 'generic';
 
 /**
  * ECP5 chip variants
@@ -65,9 +68,9 @@ export const PNR_FAMILIES: ReadonlyMap<string, PnrFamilyInfo> = new Map([
 			{ label: 'LFE5U-25F',    value: '25k',      description: '25k LUTs' },
 			{ label: 'LFE5U-45F',    value: '45k',      description: '45k LUTs' },
 			{ label: 'LFE5U-85F',    value: '85k',      description: '85k LUTs' },
-			{ label: 'LFE5UM-25F',   value: 'um-25k',   description: '25k LUTs, low power' },
-			{ label: 'LFE5UM-45F',   value: 'um-45k',   description: '45k LUTs, low power' },
-			{ label: 'LFE5UM-85F',   value: 'um-85k',   description: '85k LUTs, low power' },
+			{ label: 'LFE5UM-25F',   value: 'um-25k',   description: '25k LUTs, 3.2G SERDES' },
+			{ label: 'LFE5UM-45F',   value: 'um-45k',   description: '45k LUTs, 3.2G SERDES' },
+			{ label: 'LFE5UM-85F',   value: 'um-85k',   description: '85k LUTs, 3.2G SERDES' },
 			{ label: 'LFE5UM5G-25F', value: 'um5g-25k', description: '25k LUTs, 5G SERDES' },
 			{ label: 'LFE5UM5G-45F', value: 'um5g-45k', description: '45k LUTs, 5G SERDES' },
 			{ label: 'LFE5UM5G-85F', value: 'um5g-85k', description: '85k LUTs, 5G SERDES' },

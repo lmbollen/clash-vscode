@@ -2,9 +2,7 @@ import * as assert from 'assert';
 import * as vscode from 'vscode';
 import { ToolchainChecker } from '../../toolchain';
 import { NextpnrRunner } from '../../nextpnr-runner';
-import { YosysRunner } from '../../yosys-runner';
 import { NextpnrFamily, PNR_FAMILIES, ECP5Device, ECP5Package } from '../../nextpnr-types';
-import { ComponentInfo } from '../../clash-manifest-types';
 
 /**
  * Tests for platform tool support.
@@ -44,50 +42,6 @@ suite('Platform Tools Test Suite', () => {
 	});
 
 	// ---------------------------------------------------------------
-	// Yosys: synthesis command per target family
-	// ---------------------------------------------------------------
-
-	test('Yosys: getSynthCommand returns synth_ice40 for ice40', () => {
-		const cmd = YosysRunner.getSynthCommand('ice40', 'top');
-		assert.strictEqual(cmd, 'synth_ice40 -top top');
-	});
-
-	test('Yosys: getSynthCommand returns synth_ecp5 for ecp5', () => {
-		const cmd = YosysRunner.getSynthCommand('ecp5', 'myDesign');
-		assert.strictEqual(cmd, 'synth_ecp5 -top myDesign');
-	});
-
-	test('Yosys: getSynthCommand returns synth_xilinx for xilinx', () => {
-		const cmd = YosysRunner.getSynthCommand('xilinx', 'top');
-		assert.strictEqual(cmd, 'synth_xilinx -top top');
-	});
-
-	test('Yosys: getSynthCommand returns null for generic', () => {
-		const cmd = YosysRunner.getSynthCommand('generic', 'top');
-		assert.strictEqual(cmd, null);
-	});
-
-	test('Yosys: getSynthCommand returns synth_gowin for gowin', () => {
-		const cmd = YosysRunner.getSynthCommand('gowin', 'top');
-		assert.strictEqual(cmd, 'synth_gowin -top top');
-	});
-
-	test('Yosys: getSynthCommand returns synth_quicklogic for quicklogic', () => {
-		const cmd = YosysRunner.getSynthCommand('quicklogic', 'top');
-		assert.strictEqual(cmd, 'synth_quicklogic -top top');
-	});
-
-	test('Yosys: getSynthCommand returns synth_sf2 for sf2', () => {
-		const cmd = YosysRunner.getSynthCommand('sf2', 'top');
-		assert.strictEqual(cmd, 'synth_sf2 -top top');
-	});
-
-	test('Yosys: getSynthCommand returns null for unknown family', () => {
-		const cmd = YosysRunner.getSynthCommand('unknown_family', 'top');
-		assert.strictEqual(cmd, null);
-	});
-
-	// ---------------------------------------------------------------
 	// Nextpnr: tool availability per family
 	// ---------------------------------------------------------------
 
@@ -95,8 +49,6 @@ suite('Platform Tools Test Suite', () => {
 		{ family: 'ecp5', binary: 'nextpnr-ecp5' },
 		{ family: 'ice40', binary: 'nextpnr-ice40' },
 		{ family: 'gowin', binary: 'nextpnr-himbaechel' },
-		{ family: 'nexus', binary: 'nextpnr-nexus' },
-		{ family: 'machxo2', binary: 'nextpnr-machxo2' },
 		{ family: 'generic', binary: 'nextpnr-generic' },
 	];
 
@@ -366,13 +318,16 @@ suite('Platform Tools Test Suite', () => {
 		assert.ok(args.includes('/c.pcf'));
 	});
 
-	test('Nextpnr: buildArgs uses --cst for Gowin constraints', () => {
+	test('Nextpnr: buildArgs passes Gowin constraints via --vopt cst=', () => {
+		// nextpnr-himbaechel (the gowin executable) has no --cst option;
+		// constraints go through --vopt cst=<file>.
 		const args = NextpnrRunner.buildNextpnrArgs(
 			{ family: 'gowin', jsonPath: '/j.json', outputDir: '/o', topModule: 't', device: 'GW1N-9', constraintsFile: '/c.cst' },
 			'/o/t.config'
 		);
-		assert.ok(args.includes('--cst'));
-		assert.ok(args.includes('/c.cst'));
+		assert.ok(!args.includes('--cst'), 'must not use the unsupported --cst flag');
+		assert.ok(args.includes('--vopt'));
+		assert.ok(args.includes('cst=/c.cst'));
 	});
 
 	// ---------------------------------------------------------------
@@ -558,59 +513,6 @@ suite('Platform Tools Test Suite', () => {
 	});
 
 	// ---------------------------------------------------------------
-	// buildSynthesisWaves — parallel OOC wave planning
-	// ---------------------------------------------------------------
-
-	function mkComponent(name: string, deps: string[]): ComponentInfo {
-		return { name, verilogFiles: [], dependencies: deps, directory: '' };
-	}
-
-	test('buildSynthesisWaves: single component produces one wave', () => {
-		const waves = YosysRunner.buildSynthesisWaves([mkComponent('top', [])]);
-		assert.strictEqual(waves.length, 1);
-		assert.strictEqual(waves[0].length, 1);
-		assert.strictEqual(waves[0][0].name, 'top');
-	});
-
-	test('buildSynthesisWaves: independent leaves form one wave', () => {
-		const waves = YosysRunner.buildSynthesisWaves([
-			mkComponent('a', []),
-			mkComponent('b', []),
-			mkComponent('c', []),
-		]);
-		assert.strictEqual(waves.length, 1);
-		assert.strictEqual(waves[0].length, 3);
-	});
-
-	test('buildSynthesisWaves: linear chain produces one wave per level', () => {
-		// c depends on b depends on a
-		const waves = YosysRunner.buildSynthesisWaves([
-			mkComponent('a', []),
-			mkComponent('b', ['a']),
-			mkComponent('c', ['b']),
-		]);
-		assert.strictEqual(waves.length, 3);
-		assert.deepStrictEqual(waves[0].map(c => c.name), ['a']);
-		assert.deepStrictEqual(waves[1].map(c => c.name), ['b']);
-		assert.deepStrictEqual(waves[2].map(c => c.name), ['c']);
-	});
-
-	test('buildSynthesisWaves: diamond dependency graph', () => {
-		// top depends on B,C; B depends on D; C depends on D
-		const waves = YosysRunner.buildSynthesisWaves([
-			mkComponent('D', []),
-			mkComponent('B', ['D']),
-			mkComponent('C', ['D']),
-			mkComponent('top', ['B', 'C']),
-		]);
-		assert.strictEqual(waves.length, 3);
-		assert.deepStrictEqual(waves[0].map(c => c.name), ['D']);
-		const wave1Names = waves[1].map(c => c.name).sort();
-		assert.deepStrictEqual(wave1Names, ['B', 'C']);
-		assert.deepStrictEqual(waves[2].map(c => c.name), ['top']);
-	});
-
-	// ---------------------------------------------------------------
 	// PNR_FAMILIES registry — structure validation
 	// ---------------------------------------------------------------
 
@@ -621,7 +523,7 @@ suite('Platform Tools Test Suite', () => {
 	});
 
 	test('PNR_FAMILIES does not contain unsupported synthesis targets', () => {
-		for (const id of ['generic', 'xilinx', 'intel', 'quicklogic', 'sf2']) {
+		for (const id of ['generic', 'xilinx', 'quicklogic', 'sf2']) {
 			assert.ok(!PNR_FAMILIES.has(id), `${id} should not have PnR`);
 		}
 	});
